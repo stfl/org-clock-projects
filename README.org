@@ -149,10 +149,11 @@ character offset compare equal, and a clock-out then lands in the wrong file.
 
 Org reads a clock line more loosely than it resumes one. =org-find-open-clocks=
 accepts any inactive timestamp and the element parser calls the line a clock,
-but Org lands on one only for =[YYYY-MM-DD DDD HH:MM]= exactly — no missing time,
-no abbreviating dot after the day name, no repeater, no single-digit hour. Each
-of those is found and then answered with a *new* clock line beside it rather
-than a resumed one. Such a line is reported and left alone instead, since the
+but Org resumes only =[YYYY-MM-DD DDD HH:MM]= — no missing time, no single-digit
+hour, no repeater or warning cookie, and not a range already closed. Each of
+those is found and then answered with a *new* clock line beside it rather than
+a resumed one. The abbreviating dot some day names carry is the shape that
+looks broken and is not: Org resumes it, so this does too. Such a line is reported and left alone instead, since the
 alternative is one open clock silently becoming two.
 
 The switcher goes further and refuses outright, taking you to the offending

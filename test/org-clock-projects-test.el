@@ -1555,14 +1555,21 @@ previous clock runs, and every minute after that is billed to it."
 
 (ert-deftest org-clock-projects-test-every-unresumable-shape-is-refused ()
   "The reader and the resume branch disagree in more than one way.
-`org-find-open-clocks' matches any inactive timestamp, while Org lands on
-a clock line only for `[YYYY-MM-DD DDD HH:MM]' exactly — no missing time,
-no abbreviating dot, no repeater, no single-digit hour.  Each of those is
-found, and each would be answered with a second clock line."
+`org-find-open-clocks' matches any inactive timestamp, while Org resumes
+only `[YYYY-MM-DD DDD HH:MM]' — no missing time, no single-digit hour, no
+repeater or warning cookie, and not a range that is already closed.  Each
+of those is found, and each would be answered with a second clock line.
+The abbreviating dot after a day name is the one that looks broken and is
+not."
   (dolist (case '(("[2026-08-25 Di]"           . refuse)
-                  ("[2026-08-25 Di. 09:00]"    . refuse)
-                  ("[2026-08-25 Di 09:00 +1d]" . refuse)
                   ("[2026-08-25 Di 9:00]"      . refuse)
+                  ("[2026-08-25 Di 09:00 +1d]" . refuse)
+                  ("[2026-08-25 Di 09:00 -0d]" . refuse)
+                  ("[2026-08-25 Di 09:00]--[2026-08-25 Di 10:00]" . refuse)
+                  ;; The abbreviating dot is not damage: Org resumes it, so
+                  ;; this must too.  Refusing it would be a stricter test than
+                  ;; the branch that actually decides.
+                  ("[2026-08-25 Di. 09:00]"    . resume)
                   ("[2026-08-25 Di 09:00]"     . resume)))
     (org-clock-projects-test-with-data
         org-clock-projects-test-files

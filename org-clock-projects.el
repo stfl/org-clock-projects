@@ -262,11 +262,17 @@ stfl/doom.d#5, to be dropped if Org takes a fix."
 parser calls the line a clock, but Org's resume branch demands a full
 `[YYYY-MM-DD DDD HH:MM]'.  A line the reader accepts and the resume
 branch rejects is answered with a *new* clock line rather than a resumed
-one, which would leave the scope holding two."
+one, which would leave the scope holding two.
+
+The pattern is the one in `org-clock-in's resume `cond', deliberately,
+and not the stricter one in `org-clock-find-position': the `cond' is what
+decides whether a line is written, and it allows the abbreviating dot
+some day names carry.  Copying the stricter pattern would turn a clock
+Org resumes perfectly well into one this refuses."
   (org-with-clock-position clock
     (looking-at (concat "^[ \t]*" org-clock-string
                         " \\[[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}"
-                        " *\\sw+ +[012][0-9]:[0-5][0-9]\\][ \t]*$"))))
+                        " *\\sw+.? +[012][0-9]:[0-5][0-9]\\][ \t]*$"))))
 
 (defun org-clock-projects--running-time (start)
   "Return the time run since START, as Org formats a clock duration."
