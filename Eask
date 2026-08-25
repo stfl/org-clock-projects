@@ -14,5 +14,6 @@
 (source 'melpa)
 
 (depends-on "emacs" "28.1")
+(depends-on "org" "9.6")
 
 (script "test" "eask test ert test/org-clock-projects-test.el")

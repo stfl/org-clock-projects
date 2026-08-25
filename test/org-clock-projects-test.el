@@ -1612,5 +1612,97 @@ Org would write a second one instead."
           (should (equal (org-clock-projects-test-active-file)
                          (if switched "alpha.org" "beta.org"))))))))
 
+(ert-deftest org-clock-projects-test-a-narrowed-buffer-hides-nothing ()
+  "Narrowing is routine in Org, and every path here reads one scan.
+`org-find-open-clocks' searches from `point-min' without widening, so a
+narrowed buffer would hide its own clocks from the invariant, the bulk
+clock-out, the exit query, the switcher and the modeline at once."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(concat (org-clock-projects-test-clock-at
+                                 "A one" (org-clock-projects-test-hour 9))
+                                "* TODO A two\n")))
+    (should (= (length (org-clock-projects-open-clocks)) 1))
+    (with-current-buffer (org-clock-projects-test-buffer "alpha.org")
+      (goto-char (point-min))
+      (re-search-forward "^\* TODO A two")
+      (org-narrow-to-subtree))
+    (should (= (length (org-clock-projects-open-clocks)) 1))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-clock-out-all))
+    ;; Read the file back widened, since the buffer under test is not.
+    (with-current-buffer (org-clock-projects-test-buffer "alpha.org")
+      (should (equal (save-restriction
+                       (widen)
+                       (org-clock-projects-test-open-lines "alpha.org"))
+                     '())))))
+
+(ert-deftest org-clock-projects-test-disabling-hands-the-exit-query-back ()
+  "Turning the mode off must not leave the session with no exit query at all."
+  (let ((kill-emacs-query-functions kill-emacs-query-functions)
+        (org-clock-ask-before-exiting t))
+    (org-clock-projects-mode 1)
+    (should (memq #'org-clock-projects-kill-emacs-query kill-emacs-query-functions))
+    (should-not (memq #'org-clock-kill-emacs-query kill-emacs-query-functions))
+    (org-clock-projects-mode -1)
+    (should-not (memq #'org-clock-projects-kill-emacs-query
+                      kill-emacs-query-functions))
+    (should (memq #'org-clock-kill-emacs-query kill-emacs-query-functions))))
+
+(ert-deftest org-clock-projects-test-being-asked-at-all-stays-the-users ()
+  "`org-clock-ask-before-exiting' nil means no question, not a different one."
+  (let ((kill-emacs-query-functions kill-emacs-query-functions)
+        (org-clock-ask-before-exiting nil))
+    (org-clock-projects-mode 1)
+    (unwind-protect
+        (should-not (memq #'org-clock-projects-kill-emacs-query
+                          kill-emacs-query-functions))
+      (org-clock-projects-mode -1))))
+
+(ert-deftest org-clock-projects-test-a-failed-repair-creates-no-project ()
+  "The rollback has to cover the repair, not just the clock-in.
+Closing a surplus clock can fail, and a project created for a clock-in
+that never happened suppresses the boundary prompt for that file ever
+after."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(org-clock-projects-test-entry "A one"))
+        ("gamma.org" . ,(concat (org-clock-projects-test-clock-at
+                                 "G one" (org-clock-projects-test-hour 9))
+                                (org-clock-projects-test-clock-at
+                                 "G two" (org-clock-projects-test-hour 10))
+                                "* TODO G three\n")))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "alpha.org" "A one"))
+    (org-clock-projects-test-advance 30)
+    (with-current-buffer (org-clock-projects-test-buffer "gamma.org")
+      (setq buffer-read-only t))
+    (org-clock-projects-test-with-answers '(t t)
+      (should-error
+       (save-current-buffer
+         (org-clock-projects-test-goto "gamma.org" "G three")
+         (org-clock-in))))
+    (should (equal (org-clock-projects-test-current) "alpha"))
+    (should-not (assoc (file-truename
+                        (expand-file-name "gamma.org" org-directory))
+                       org-clock-projects--projects))))
+
+(ert-deftest org-clock-projects-test-files-sharing-a-base-name-stay-distinct ()
+  "The resolver may draw from any registry, so alike file names are legal."
+  (org-clock-projects-test-with-data
+      '("clienta/tasks.org" "clientb/tasks.org")
+      `(("clienta/tasks.org" . ,(org-clock-projects-test-entry "A one"))
+        ("clientb/tasks.org" . ,(org-clock-projects-test-entry "B one")))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "clienta/tasks.org" "A one")
+      (org-clock-projects-test-advance 30)
+      (org-clock-projects-test-fork "clientb/tasks.org" "B one"))
+    (should (equal org-clock-projects-mode-line-string "⏱ clientb/tasks [+1]"))
+    (org-clock-projects-test-with-choice "clienta/tasks"
+      (org-clock-projects-switch)
+      (should (equal (org-clock-projects-test-candidates)
+                     '("clienta/tasks" "clientb/tasks"))))
+    (should (equal (org-clock-projects-test-active-heading) "A one"))))
+
 (provide 'org-clock-projects-test)
 ;;; org-clock-projects-test.el ends here

@@ -120,7 +120,7 @@ While no project exists, every path in this package defers to stock Org."
 
 (defun org-clock-projects--truename (file)
   "Return the truename of FILE, expanded against `org-directory'."
-  (when (and file (stringp file))
+  (when (stringp file)
     (file-truename (expand-file-name file (or org-directory default-directory)))))
 
 (defun org-clock-projects--candidate-files ()
@@ -142,8 +142,21 @@ base buffer."
      (buffer-file-name (or (buffer-base-buffer buffer) buffer)))))
 
 (defun org-clock-projects-name (project)
-  "Return the display name of PROJECT."
-  (file-name-base project))
+  "Return the display name of PROJECT.
+The base name, qualified by its directory when another candidate file
+shares it.  The resolver may draw from any registry, so two projects
+whose files are named alike is a legal arrangement rather than damage,
+and one name for both would make them indistinguishable in the switcher,
+in the modeline and at every prompt."
+  (let ((base (file-name-base project)))
+    (if (< 1 (seq-count (lambda (candidate)
+                          (equal base (file-name-base candidate)))
+                        (org-clock-projects--candidate-files)))
+        (format "%s/%s"
+                (file-name-nondirectory
+                 (directory-file-name (or (file-name-directory project) "")))
+                base)
+      base)))
 
 (defun org-clock-projects--scope (file)
   "Return the created project owning FILE, or nil.
@@ -190,7 +203,7 @@ Org's session-wide one."
 
 (defsubst org-clock-projects--entry-start (entry)
   "Return the start time of open-clock ENTRY."
-  (cdr (cdr entry)))
+  (cddr entry))
 
 (defun org-clock-projects-open-clocks ()
   "Return every open clock, oldest first.
@@ -206,8 +219,15 @@ file is not a project candidate, so an unscoped clock is never invisible."
   (let (entries)
     (dolist (file (org-clock-projects--candidate-files))
       (when (file-exists-p file)
-        (dolist (clock (org-find-open-clocks file))
-          (push (cons file clock) entries))))
+        ;; `org-find-open-clocks' scans from `point-min' without widening, so
+        ;; a narrowed buffer hides its own clocks — and everything here is
+        ;; derived from this one scan, so the invariant, the bulk clock-out,
+        ;; the exit query and the modeline would all go blind together.
+        (with-current-buffer (or (get-file-buffer file) (find-file-noselect file))
+          (save-restriction
+            (widen)
+            (dolist (clock (org-find-open-clocks file))
+              (push (cons file clock) entries))))))
     (when (org-clock-is-active)
       (let ((file (org-clock-projects--buffer-file (org-clocking-buffer))))
         (when (and file
@@ -315,8 +335,8 @@ the alternative is Org quietly writing a second clock beside it."
   "Hand CLOCK to Org as the active clock.  See `org-clock-projects--activate'."
   (let ((org-clock-resolving-clocks-due-to-idleness parallel)
         ;; Resuming a clock this package located must never raise Org's
-        ;; dangling-clock prompt; Org binds this the same way in
-        ;; `org-clock-resolve-clock'.
+        ;; dangling-clock prompt; Org binds this the same way around the
+        ;; resuming clock-in in `org-clock-load'.
         (org-clock-auto-clock-resolution nil)
         (org-clock-projects--inhibit t))
     (org-clock-clock-in clock t)))
@@ -326,7 +346,7 @@ the alternative is Org quietly writing a second clock beside it."
 With no AT-TIME, Org applies the configured rounding itself.
 Clock-outs this package performs are bookkeeping rather than the end of a
 task, and several of them are followed by more work in the same command,
-so they use the binding Org itself uses in `org-clock-auto-clockout'.
+so they use the binding Org itself uses in `org-clock-out-if-current'.
 This is `org-clock-clock-out' with `org-clock-projects--active-clock-p'
 in place of `org-is-active-clock': the two differ exactly when another
 project's clock sits at the same character offset, and there the stock
@@ -450,6 +470,19 @@ passed through with the session-wide continuation prompt alone."
         (start-time (cadr args)))
     (cond
      (org-clock-projects--inhibit (apply orig-fn args))
+     ;; Org resolves dangling clocks by clocking into them; scoping those
+     ;; would raise this package's questions in the middle of a resolution.
+     (org-clock-resolving-clocks (apply orig-fn args))
+     ((not (org-clock-projects--live-p))
+      ;; Dormant: stock Org, plus the session-wide continuation prompt.  This
+      ;; is tested before the selection is intercepted below, so that while no
+      ;; project exists every path really does reach Org unaltered.
+      (let ((org-clock-continuously
+             (if start-time
+                 org-clock-continuously
+               (or (org-clocking-p)
+                   (org-clock-projects--continue-p org-clock-out-time)))))
+        (apply orig-fn args)))
      ;; A task selection resolves to a marker in another file, so the target
      ;; cannot be read off the current buffer.  Resolve it here and clock in
      ;; at that task, which re-enters with the right file current.
@@ -457,15 +490,35 @@ passed through with the session-wide continuation prompt alone."
       (let ((task (org-clock-select-task "Clock-in on task: ")))
         (unless task (error "Abort"))
         (org-with-point-at task (org-clock-in nil start-time))))
-     ((not (org-clock-projects--live-p))
-      ;; Dormant: stock Org, plus the session-wide continuation prompt.
-      (let ((org-clock-continuously
-             (if start-time
-                 org-clock-continuously
-               (or (org-clocking-p)
-                   (org-clock-projects--continue-p org-clock-out-time)))))
-        (apply orig-fn args)))
      (t (org-clock-projects--clock-in-scoped orig-fn args)))))
+
+(defun org-clock-projects--resolve-target (file scope parallel)
+  "Decide which project a clock-in on FILE belongs to.
+SCOPE is the project owning FILE, and PARALLEL is non-nil when the caller
+has already settled what becomes of the running clock.  Returns the cons
+of the target project and the parallel decision.
+
+Crossing a boundary asks two independent questions: whether to stop the
+current project's clock, and what to do about the target file."
+  (cond
+   ;; `org-clock-projects-fork' has already settled the scope.
+   (parallel (cons scope parallel))
+   ((equal scope org-clock-projects--current)
+    (cons org-clock-projects--current parallel))
+   (t
+    ;; Question one: the clock that is running now.
+    (when (org-clocking-p)
+      (setq parallel
+            (not (y-or-n-p (format "Stop the clock running in %s? "
+                                   (org-clock-projects--active-label))))))
+    ;; Question two: the file being clocked into.  Creating a project is only
+    ;; on offer when the file may become one.
+    (cons (if (and (null scope) (org-clock-projects--candidate-p file))
+              (and (y-or-n-p (format "Create clock project %s? "
+                                     (org-clock-projects-name file)))
+                   (org-clock-projects--create file))
+            scope)
+          parallel))))
 
 (defun org-clock-projects--clock-in-scoped (orig-fn args)
   "Run ORIG-FN, `org-clock-in', with ARGS, scoped to a project.
@@ -474,102 +527,90 @@ stop the current project's clock, and what to do about the target file.
 A start time supplied in ARGS is the caller's, and only the scope and the
 one-clock-per-project invariant are decided here."
   (let* ((file (org-clock-projects--buffer-file))
-         (scope (org-clock-projects--scope file))
-         (parallel org-clock-projects--parallel)
-         ;; Nothing here is committed until the clock-in itself succeeds.
+         (start-time (cadr args))
+         ;; Captured before anything is decided: nothing below is committed
+         ;; until the clock-in itself succeeds.
          (previous-current org-clock-projects--current)
          (previous-projects org-clock-projects--projects)
-         (committed nil)
-         (target (cond
-                  ;; `org-clock-projects-fork' has already settled the scope.
-                  (parallel scope)
-                  ((equal scope org-clock-projects--current)
-                   org-clock-projects--current)
-                  (t
-                   ;; Question one: the clock that is running now.
-                   (when (org-clocking-p)
-                     (setq parallel
-                           (not (y-or-n-p
-                                 (format "Stop the clock running in %s? "
-                                         (org-clock-projects--active-label))))))
-                   ;; Question two: the file being clocked into.  Creating a
-                   ;; project is only on offer when the file may become one.
-                   (if (and (null scope) (org-clock-projects--candidate-p file))
-                       (and (y-or-n-p (format "Create clock project %s? "
-                                              (org-clock-projects-name file)))
-                            (org-clock-projects--create file))
-                     scope))))
-         ;; One clock per project.
-         (existing (org-clock-projects--scope-clocks target)))
-    (when existing
-      ;; More than one is damage rather than a state this package creates, so
-      ;; the surplus is closed rather than assumed away.
-      (if (cadr args)
-          ;; The caller fixed when the new clock begins, so the clocks it
-          ;; replaces have to end at that same moment.  Handing one to Org to
-          ;; interrupt would end it at now instead, and the difference would
-          ;; be billed to both.
-          (dolist (clock existing)
-            (org-clock-projects--clock-out-at clock (cadr args)))
-        ;; The newest is handed to Org active, and Org's own interrupt
-        ;; handling closes it, exactly as it would for any ordinary clock-in
-        ;; within one file.
-        (dolist (clock (butlast existing))
-          (org-clock-projects--clock-out clock))
-        (when (org-clock-projects--activate (car (last existing)) parallel)
-          ;; Org must now stop the clock it has just been handed.
-          (setq parallel nil))))
-    (setq org-clock-projects--current target)
+         (committed nil))
     (unwind-protect
         (prog1
-            (cond
-             ;; The caller fixed the start time, so it wins.  Leaving
-             ;; `org-clock-continuously' ambient would let the clock-out Org
-             ;; performs on the way in overwrite `org-clock-out-time' with now
-             ;; and beat the caller's time to `org-clock-in's `or'.
-             ((cadr args)
-              ;; Same reasoning for a clock still running elsewhere: Org would
-              ;; close it at now while this one starts earlier.
-              (when (and (org-clocking-p) (not parallel))
-                (org-clock-projects--clock-out-at
-                 (cons org-clock-marker org-clock-start-time) (cadr args)))
-              (let ((org-clock-continuously nil)
-                    (org-clock-leftover-time nil)
-                    (org-clock-resolving-clocks-due-to-idleness parallel))
-                (apply orig-fn args)))
-             ;; A clock is being stopped by this very clock-in, so the two are
-             ;; contiguous and the new one starts exactly where that one ends.
-             ;; There is no gap to misattribute — and letting Org compute a
-             ;; fresh start instead would round it *down*, below the end just
-             ;; rounded *up*, and bill one rounding interval to both.
-             ((and (org-clocking-p) (not parallel))
-              (let ((org-clock-continuously t)
-                    (org-clock-leftover-time nil)
-                    (org-clock-resolving-clocks-due-to-idleness nil))
-                (apply orig-fn args)))
-             ;; Start from the last clock-out: this project's own, never the
-             ;; session's, which may belong to another engagement.
-             ((equal (car args) '(64))
-              (let ((org-clock-continuously nil)
-                    (org-clock-leftover-time nil)
-                    (org-clock-resolving-clocks-due-to-idleness parallel))
-                (funcall orig-fn nil (org-clock-projects--out-time target))))
-             (t
-              ;; No clock is ending here, so any gap belongs to whoever the
-              ;; target is, and only the target's own clock-out time can close
-              ;; it.  `org-clock-continuously' cannot be used: `org-clock-out'
-              ;; overwrites `org-clock-out-time' with now before `org-clock-in'
-              ;; reads it, which is how time bridges between engagements.
-              (let* ((out (org-clock-projects--out-time target))
-                     (start (and (org-clock-projects--continue-p out) out))
-                     (org-clock-continuously nil)
-                     (org-clock-leftover-time nil)
-                     (org-clock-resolving-clocks-due-to-idleness parallel))
-                (funcall orig-fn (car args) start))))
+            (pcase-let ((`(,target . ,parallel)
+                         (org-clock-projects--resolve-target
+                          file (org-clock-projects--scope file)
+                          org-clock-projects--parallel)))
+              ;; One clock per project.
+              (let ((existing (org-clock-projects--scope-clocks target)))
+                (when existing
+                  ;; More than one is damage rather than a state this package
+                  ;; creates, so the surplus is closed rather than assumed away.
+                  (if start-time
+                      ;; The caller fixed when the new clock begins, so the
+                      ;; clocks it replaces have to end at that same moment.
+                      ;; Handing one to Org to interrupt would end it at now
+                      ;; instead, and the difference would be billed to both.
+                      (dolist (clock existing)
+                        (org-clock-projects--clock-out-at clock start-time))
+                    ;; The newest is handed to Org active, and Org's own
+                    ;; interrupt handling closes it, exactly as it would for
+                    ;; any ordinary clock-in within one file.
+                    (dolist (clock (butlast existing))
+                      (org-clock-projects--clock-out clock))
+                    (when (org-clock-projects--activate
+                           (car (last existing)) parallel)
+                      ;; Org must now stop the clock it has just been handed.
+                      (setq parallel nil)))))
+              (setq org-clock-projects--current target)
+              (cond
+               ;; The caller fixed the start time, so it wins.  Leaving
+               ;; `org-clock-continuously' ambient would let the clock-out Org
+               ;; performs on the way in overwrite `org-clock-out-time' with
+               ;; now and beat the caller's time to `org-clock-in's `or'.
+               (start-time
+                ;; Same reasoning for a clock still running elsewhere: Org
+                ;; would close it at now while this one starts earlier.
+                (when (and (org-clocking-p) (not parallel))
+                  (org-clock-projects--clock-out-at
+                   (cons org-clock-marker org-clock-start-time) start-time))
+                (let ((org-clock-continuously nil)
+                      (org-clock-leftover-time nil)
+                      (org-clock-resolving-clocks-due-to-idleness parallel))
+                  (apply orig-fn args)))
+               ;; A clock is being stopped by this very clock-in, so the two
+               ;; are contiguous and the new one starts exactly where that one
+               ;; ends.  There is no gap to misattribute — and letting Org
+               ;; compute a fresh start instead would round it *down*, below
+               ;; the end just rounded *up*, billing one interval to both.
+               ((and (org-clocking-p) (not parallel))
+                (let ((org-clock-continuously t)
+                      (org-clock-leftover-time nil)
+                      (org-clock-resolving-clocks-due-to-idleness nil))
+                  (apply orig-fn args)))
+               ;; Start from the last clock-out: this project's own, never the
+               ;; session's, which may belong to another engagement.
+               ((equal (car args) '(64))
+                (let ((org-clock-continuously nil)
+                      (org-clock-leftover-time nil)
+                      (org-clock-resolving-clocks-due-to-idleness parallel))
+                  (funcall orig-fn nil (org-clock-projects--out-time target))))
+               (t
+                ;; No clock is ending here, so any gap belongs to whoever the
+                ;; target is, and only the target's own clock-out time can
+                ;; close it.  `org-clock-continuously' cannot be used:
+                ;; `org-clock-out' overwrites `org-clock-out-time' with now
+                ;; before `org-clock-in' reads it, which is how time bridges
+                ;; between engagements.
+                (let* ((out (org-clock-projects--out-time target))
+                       (start (and (org-clock-projects--continue-p out) out))
+                       (org-clock-continuously nil)
+                       (org-clock-leftover-time nil)
+                       (org-clock-resolving-clocks-due-to-idleness parallel))
+                  (funcall orig-fn (car args) start)))))
           (setq committed t))
       (unless committed
         ;; A project created for a clock-in that never happened would suppress
-        ;; the boundary prompt for that file ever after.
+        ;; the boundary prompt for that file ever after.  This covers the
+        ;; repair as well as the clock-in: closing a surplus clock can fail.
         (setq org-clock-projects--current previous-current
               org-clock-projects--projects previous-projects))
       (org-clock-projects--update-mode-line))))
@@ -673,8 +714,11 @@ it is not.  With none, this falls back to `org-clock-goto'."
 (defun org-clock-projects--candidate (entry entries)
   "Return the candidate string for ENTRY among ENTRIES.
 A project holding one clock is named by itself.  One holding several —
-which only happens through damage — names each clock by its heading, so
-the surplus can be picked out and closed."
+which only happens through damage — names each clock by its heading.
+Two clocks on the *same* heading still read alike, and Org resumes the
+first unclosed line of an entry whichever marker it is handed, so that
+shape is repaired by clocking in on the project or by
+`org-clock-projects-clock-out-all' rather than through the switcher."
   (let ((name (org-clock-projects-name (org-clock-projects--entry-file entry))))
     (if (< 1 (seq-count (lambda (other)
                           (equal (org-clock-projects--entry-file other)
@@ -762,7 +806,10 @@ project, returning the session to its untouched state."
   (let ((clocks (org-clock-projects--file-clocks project))
         (name (org-clock-projects-name project)))
     (when clocks
-      (if (y-or-n-p (format "Clock out the open clock in %s? " name))
+      (if (y-or-n-p (format "Clock out %s in %s? "
+                            (mapconcat #'org-clock-projects--clock-description
+                                       clocks ", ")
+                            name))
           (dolist (clock clocks) (org-clock-projects--clock-out clock))
         (when (org-clock-projects--scope-clocks nil)
           (display-warning
@@ -822,8 +869,12 @@ stays empty."
       (progn
         (advice-add 'org-clock-in :around #'org-clock-projects--clock-in-advice)
         (advice-add 'org-clock-out :around #'org-clock-projects--clock-out-advice)
-        (remove-hook 'kill-emacs-query-functions #'org-clock-kill-emacs-query)
-        (add-hook 'kill-emacs-query-functions #'org-clock-projects-kill-emacs-query)
+        ;; Whether to be asked at all stays the user's, through Org's own
+        ;; option; this only changes which question gets asked.
+        (when org-clock-ask-before-exiting
+          (remove-hook 'kill-emacs-query-functions #'org-clock-kill-emacs-query)
+          (add-hook 'kill-emacs-query-functions
+                    #'org-clock-projects-kill-emacs-query))
         (unless (memq 'org-clock-projects-mode-line-string global-mode-string)
           (setq global-mode-string
                 (append (or global-mode-string '(""))
@@ -832,6 +883,9 @@ stays empty."
     (advice-remove 'org-clock-in #'org-clock-projects--clock-in-advice)
     (advice-remove 'org-clock-out #'org-clock-projects--clock-out-advice)
     (remove-hook 'kill-emacs-query-functions #'org-clock-projects-kill-emacs-query)
+    ;; Hand the question back rather than leaving the session with none.
+    (when org-clock-ask-before-exiting
+      (add-hook 'kill-emacs-query-functions #'org-clock-kill-emacs-query))
     (setq global-mode-string
           (delq 'org-clock-projects-mode-line-string global-mode-string))))
 

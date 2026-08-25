@@ -96,7 +96,9 @@ fork command says how many it is about to close.
 
 Reporting one clock per file instead would leave the rest invisible to exactly
 the commands that exist to close them, and therefore permanent — surviving every
-restart and never offered again.
+restart and never offered again. For the same reason the scan widens: Org's own
+search starts at =point-min= and respects narrowing, and a narrowed project
+buffer would otherwise hide its clocks from all of it at once.
 
 * Notes on the implementation
 
