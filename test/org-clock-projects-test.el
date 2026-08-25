@@ -499,7 +499,7 @@ alist of (NAME . TEXT); intermediate directories are created."
     (org-clock-projects-test-with-answers '(t)
       (org-clock-projects-test-fork "alpha.org" "A two")
       (should (= (length (org-clock-projects-test-questions)) 1))
-      (should (string-match-p "already has an open clock"
+      (should (string-match-p "A one (12:00, 1:00)"
                               (car (org-clock-projects-test-questions)))))
     (should (= (length (org-clock-projects-test-closed-lines "alpha.org")) 1))
     (should (= (length (org-clock-projects-test-open-lines "alpha.org")) 1))
@@ -1284,8 +1284,11 @@ end back past its own start, which is how a bad duration actually arises."
       `(("alpha.org" . ,(org-clock-projects-test-two-dangling)))
     (org-clock-projects-test-with-answers '(t)
       (org-clock-projects-test-fork "alpha.org" "A two")
-      (should (string-match-p "2 open clocks"
-                              (car (org-clock-projects-test-questions)))))
+      ;; The prompt says what it is about to close, so a five-minute clock and
+      ;; one open since yesterday can be told apart before answering.
+      (let ((prompt (car (org-clock-projects-test-questions))))
+        (should (string-match-p "A one (09:00, 3:00)" prompt))
+        (should (string-match-p "A two (10:00, 2:00)" prompt))))
     (should (= (length (org-clock-projects-test-closed-lines "alpha.org")) 2))
     (should (= (length (org-clock-projects-test-open-lines "alpha.org")) 1))
     ;; Started, not resumed: leaving the clock at point open would make Org
@@ -1496,23 +1499,87 @@ boundary prompt for that file ever after."
   "Org reads a clock line more loosely than it resumes one.
 A line without a start time is found by the reader, and the element
 parser calls it a clock, but Org's resume branch rejects it and answers
-with a *new* clock line instead — leaving the project holding two."
+with a *new* clock line instead — so handing one over would turn one open
+clock into two.  It is reported and left alone: closing it would invent
+the hours since midnight, and resuming it is what Org declines to do."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(concat
+                         (format "* TODO A one\n:LOGBOOK:\nCLOCK: %s\n:END:\n"
+                                 (format-time-string
+                                  "[%Y-%m-%d %a]"
+                                  (org-clock-projects-test-time)))
+                         (org-clock-projects-test-entry "A two")))
+        ("beta.org" . ,(org-clock-projects-test-entry "B one")))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "beta.org" "B one"))
+    (org-clock-projects-test-advance 30)
+    (let (warnings)
+      (cl-letf (((symbol-function 'display-warning)
+                 (lambda (_type message &rest _) (push message warnings))))
+        ;; Stop beta, enrol alpha.  The repair reaches alpha's damaged line.
+        (org-clock-projects-test-with-answers '(t t)
+          (org-clock-projects-test-clock-in "alpha.org" "A two")))
+      (should (= (length warnings) 1))
+      (should (string-match-p "A one" (car warnings))))
+    ;; The damaged line, untouched, and the one new clock — not a third
+    ;; written beside it.
+    (should (= (length (org-clock-projects-test-lines "alpha.org")) 2))
+    (should (member (format "CLOCK: %s"
+                            (format-time-string "[%Y-%m-%d %a]"
+                                                (org-clock-projects-test-time 30)))
+                    (org-clock-projects-test-lines "alpha.org")))
+    (should (equal (org-clock-projects-test-active-heading) "A two"))))
+
+(ert-deftest org-clock-projects-test-switch-refuses-rather-than-pretends ()
+  "A switch that cannot happen must not look like one that did.
+Otherwise the user goes on believing they changed project while the
+previous clock runs, and every minute after that is billed to it."
   (org-clock-projects-test-with-data
       org-clock-projects-test-files
       `(("alpha.org" . ,(format "* TODO A one\n:LOGBOOK:\nCLOCK: %s\n:END:\n"
                                 (format-time-string
-                                 "[%Y-%m-%d %a]"
-                                 (org-clock-projects-test-time)))))
-    (let (warnings)
-      (cl-letf (((symbol-function 'display-warning)
-                 (lambda (_type message &rest _) (push message warnings))))
-        (org-clock-projects-test-with-choice nil
+                                 "[%Y-%m-%d %a]" (org-clock-projects-test-time))))
+        ("beta.org" . ,(org-clock-projects-test-entry "B one")))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "beta.org" "B one"))
+    (org-clock-projects-test-advance 30)
+    (org-clock-projects-test-with-choice "alpha"
+      (should-error (org-clock-projects-switch) :type 'user-error))
+    ;; Nothing moved: the project, the modeline and the running clock all stand.
+    (should (equal (org-clock-projects-test-current) "beta"))
+    (should (equal org-clock-projects-mode-line-string "⏱ beta [+1]"))
+    (should (equal (org-clock-projects-test-active-file) "beta.org"))
+    ;; But point is on the line that needs repairing.
+    (should (equal (file-name-nondirectory (buffer-file-name)) "alpha.org"))))
+
+(ert-deftest org-clock-projects-test-every-unresumable-shape-is-refused ()
+  "The reader and the resume branch disagree in more than one way.
+`org-find-open-clocks' matches any inactive timestamp, while Org lands on
+a clock line only for `[YYYY-MM-DD DDD HH:MM]' exactly — no missing time,
+no abbreviating dot, no repeater, no single-digit hour.  Each of those is
+found, and each would be answered with a second clock line."
+  (dolist (case '(("[2026-08-25 Di]"           . refuse)
+                  ("[2026-08-25 Di. 09:00]"    . refuse)
+                  ("[2026-08-25 Di 09:00 +1d]" . refuse)
+                  ("[2026-08-25 Di 9:00]"      . refuse)
+                  ("[2026-08-25 Di 09:00]"     . resume)))
+    (org-clock-projects-test-with-data
+        org-clock-projects-test-files
+        `(("alpha.org" . ,(format "* TODO A one\n:LOGBOOK:\nCLOCK: %s\n:END:\n"
+                                  (car case)))
+          ("beta.org" . ,(org-clock-projects-test-entry "B one")))
+      (org-clock-projects-test-with-answers '()
+        (org-clock-projects-test-fork "beta.org" "B one"))
+      (org-clock-projects-test-advance 30)
+      (org-clock-projects-test-with-choice "alpha"
+        (if (eq (cdr case) 'refuse)
+            (should-error (org-clock-projects-switch) :type 'user-error)
           (org-clock-projects-switch)))
-      (should (= (length warnings) 1))
-      (should (string-match-p "A one" (car warnings))))
-    ;; The one line it started with, and no second one written beside it.
-    (should (= (length (org-clock-projects-test-lines "alpha.org")) 1))
-    (should-not (org-clock-is-active))))
+      ;; Whichever way it went, the file still holds exactly the one line.
+      (should (equal (length (org-clock-projects-test-lines "alpha.org")) 1))
+      (should (equal (org-clock-projects-test-active-file)
+                     (if (eq (cdr case) 'refuse) "beta.org" "alpha.org"))))))
 
 (provide 'org-clock-projects-test)
 ;;; org-clock-projects-test.el ends here

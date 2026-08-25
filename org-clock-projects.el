@@ -268,6 +268,22 @@ one, which would leave the scope holding two."
                         " \\[[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}"
                         " *\\sw+ +[012][0-9]:[0-5][0-9]\\][ \t]*$"))))
 
+(defun org-clock-projects--running-time (start)
+  "Return the time run since START, as Org formats a clock duration."
+  (org-duration-from-minutes
+   (/ (org-time-convert-to-integer (time-subtract (current-time) start)) 60)
+   'h:mm))
+
+(defun org-clock-projects--clock-description (clock)
+  "Describe CLOCK by its heading, start time and how long it has run.
+A clock that has been open since yesterday and one opened five minutes
+ago are answered for with the same keystroke, so the answer needs to be
+able to tell them apart."
+  (format "%s (%s, %s)"
+          (org-clock-projects--clock-heading clock)
+          (format-time-string "%H:%M" (cdr clock))
+          (org-clock-projects--running-time (cdr clock))))
+
 (defun org-clock-projects--activate (clock &optional parallel)
   "Make CLOCK Org's active clock, and return non-nil when it becomes so.
 This is Org's own clock-in with resume enabled: it reads the start time
@@ -591,9 +607,9 @@ that a project never holds two."
                  (not (y-or-n-p
                        (format "%s already has %s; clock out and start here? "
                                (org-clock-projects-name file)
-                               (if (cdr existing)
-                                   (format "%d open clocks" (length existing))
-                                 "an open clock")))))
+                               (mapconcat
+                                #'org-clock-projects--clock-description
+                                existing ", ")))))
         (user-error "Aborted"))
       (org-clock-projects--create file)
       ;; Every one of them: leaving any behind keeps the project over its one
@@ -618,31 +634,33 @@ it is not.  With none, this falls back to `org-clock-goto'."
 (defun org-clock-projects--goto (entry)
   "Make open-clock ENTRY active and jump to its heading."
   (let ((clock (org-clock-projects--entry-clock entry)))
+    (unless (org-clock-projects--resumable-p clock)
+      ;; Go to the offending line so it can be repaired, then say plainly that
+      ;; nothing was switched.  Reporting this quietly would leave the user
+      ;; believing they had changed project while the previous clock runs on,
+      ;; and every minute after that is billed to it.
+      (pop-to-buffer-same-window (marker-buffer (car clock)))
+      (widen)
+      (goto-char (car clock))
+      (org-back-to-heading t)
+      (org-fold-show-context)
+      (user-error "Cannot switch to %s: its clock line carries no start time"
+                  (org-clock-projects-name
+                   (org-clock-projects--entry-file entry))))
     ;; Every other open clock stays open: this switches which one Org considers
     ;; active, it does not end anything.
-    (let ((active (org-clock-projects--activate clock t)))
-      (setq org-clock-projects--current
-            (org-clock-projects--scope (org-clock-projects--entry-file entry)))
-      (org-clock-projects--update-mode-line)
-      (if active
-          (org-clock-goto)
-        ;; It could not be made active, so go to it directly rather than to
-        ;; whichever clock still is.
-        (pop-to-buffer-same-window (marker-buffer (car clock)))
-        (widen)
-        (goto-char (car clock))
-        (org-back-to-heading t)
-        (org-fold-show-context)))))
+    (org-clock-projects--activate clock t)
+    (setq org-clock-projects--current
+          (org-clock-projects--scope (org-clock-projects--entry-file entry)))
+    (org-clock-projects--update-mode-line)
+    (org-clock-goto)))
 
 (defun org-clock-projects--annotation (entry)
   "Return the annotation for open-clock ENTRY: heading, start and duration."
   (let ((start (org-clock-projects--entry-start entry)))
     (format "  %s  %s  %s"
             (format-time-string "%H:%M" start)
-            (org-duration-from-minutes
-             (/ (org-time-convert-to-integer (time-subtract (current-time) start))
-                60)
-             'h:mm)
+            (org-clock-projects--running-time start)
             (org-clock-projects--clock-heading
              (org-clock-projects--entry-clock entry)))))
 
@@ -773,10 +791,10 @@ the files.  Always returns t, as `kill-emacs-query-functions' requires."
            (buffer (marker-buffer (car clock))))
       (when (and (buffer-live-p buffer)
                  (yes-or-no-p
-                  (format "Clock out %s (%s)? "
+                  (format "Clock out %s: %s? "
                           (org-clock-projects-name
                            (org-clock-projects--entry-file entry))
-                          (org-clock-projects--clock-heading clock))))
+                          (org-clock-projects--clock-description clock))))
         (org-clock-projects--clock-out clock)
         (with-current-buffer buffer
           (when (buffer-file-name) (save-buffer))))))

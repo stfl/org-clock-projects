@@ -40,6 +40,10 @@ no constraint, and an empty modeline segment.
 | =org-clock-projects-clear=         | Forget a project's session state; =C-u= for every project                |
 | =org-clock-projects-kill-emacs-query= | Ask about each open clock on exit; installed by the mode            |
 
+Prompts that offer to close a clock name it, and say when it started and how
+long it has run, so a clock opened five minutes ago and one left open since
+yesterday can be told apart before answering.
+
 The switcher jumps straight to a single open clock without prompting, making it
 active first if it is not, and falls back to =org-clock-goto= when none is open.
 With several it offers project names through =completing-read=, annotated with
@@ -145,11 +149,16 @@ character offset compare equal, and a clock-out then lands in the wrong file.
 
 Org reads a clock line more loosely than it resumes one. =org-find-open-clocks=
 accepts any inactive timestamp and the element parser calls the line a clock,
-but the resume branch demands a full =[YYYY-MM-DD DDD HH:MM]= — so a hand-edited
-=CLOCK: [2026-08-25 Tue]=, or a single-digit hour, is found and then answered with
-a *new* clock line beside it rather than a resumed one. Such a line is reported
-and left alone instead, since the alternative is one open clock silently
-becoming two.
+but Org lands on one only for =[YYYY-MM-DD DDD HH:MM]= exactly — no missing time,
+no abbreviating dot after the day name, no repeater, no single-digit hour. Each
+of those is found and then answered with a *new* clock line beside it rather
+than a resumed one. Such a line is reported and left alone instead, since the
+alternative is one open clock silently becoming two.
+
+The switcher goes further and refuses outright, taking you to the offending
+line. A switch that cannot happen must not look like one that did: the
+alternative is carrying on in the belief that you changed project while the
+previous clock runs, and every minute after that is billed to it.
 
 One Org behaviour is inherited rather than worked around: =org-clock-in= stops the
 running clock before it writes the new clock line, so a clock-in that then fails
