@@ -162,6 +162,9 @@ arrangement rather than damage, and one name for both would make them
 indistinguishable in the switcher, in the modeline and at every prompt.
 Qualifying by a single directory is not enough: the directories can be
 named alike too."
+  ;; Distinct truenames always differ at some depth, which is what ends this;
+  ;; the fixed-point test is a bound on it rather than the mechanism, for a
+  ;; candidate list that turns out not to hold distinct paths after all.
   (let ((candidates (org-clock-projects--candidate-files))
         (depth 1)
         name previous)

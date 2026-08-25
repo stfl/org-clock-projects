@@ -1744,5 +1744,32 @@ after."
         (should (= (length (org-clock-projects-test-questions)) 1))))
     (should (equal (org-clock-projects-test-open-lines "alpha.org") '()))))
 
+(ert-deftest org-clock-projects-test-name-deepening-always-ends ()
+  "Deepening a name walks towards the root, so it has to be able to stop.
+One path being a strict suffix of another is the shape that reaches a
+fixed point on one side while the other is still growing.  A loop that
+spun here would hang Emacs, so the shapes are exercised rather than
+argued about."
+  (dolist (files '(("client/tasks.org" "x/client/tasks.org")
+                   ("client/tasks.org" "x/client/tasks.org" "y/client/tasks.org")
+                   ("a/b/c/tasks.org" "z/a/b/c/tasks.org")
+                   ("tasks.org" "d/tasks.org" "d/e/tasks.org")
+                   ("a/n.org" "b/n.org" "a/x/n.org" "b/x/n.org")))
+    (org-clock-projects-test-with-sandbox
+      (setq org-clock-projects-files files)
+      (dolist (f files)
+        (let ((path (expand-file-name f org-directory)))
+          (make-directory (file-name-directory path) t)
+          (with-temp-file path (insert "* TODO T\n"))))
+      (let ((names (with-timeout (10 'did-not-terminate)
+                     (mapcar (lambda (f)
+                               (org-clock-projects-name
+                                (file-truename
+                                 (expand-file-name f org-directory))))
+                             files))))
+        (should (listp names))
+        (should (equal (length names)
+                       (length (delete-dups (copy-sequence names)))))))))
+
 (provide 'org-clock-projects-test)
 ;;; org-clock-projects-test.el ends here
