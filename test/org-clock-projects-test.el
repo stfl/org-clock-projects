@@ -1704,5 +1704,45 @@ after."
                      '("clienta/tasks" "clientb/tasks"))))
     (should (equal (org-clock-projects-test-active-heading) "A one"))))
 
+(ert-deftest org-clock-projects-test-names-qualify-as-far-as-they-must ()
+  "Qualifying by one directory is not enough: directories collide too."
+  (org-clock-projects-test-with-data
+      '("a/client/tasks.org" "b/client/tasks.org" "solo.org")
+      `(("a/client/tasks.org" . ,(org-clock-projects-test-entry "A one"))
+        ("b/client/tasks.org" . ,(org-clock-projects-test-entry "B one"))
+        ("solo.org" . ,(org-clock-projects-test-entry "S one")))
+    ;; A name that is already unique is not lengthened.
+    (should (equal (org-clock-projects-name
+                    (file-truename (expand-file-name "solo.org" org-directory)))
+                   "solo"))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "a/client/tasks.org" "A one")
+      (org-clock-projects-test-advance 30)
+      (org-clock-projects-test-fork "b/client/tasks.org" "B one"))
+    (should (equal org-clock-projects-mode-line-string "⏱ b/client/tasks [+1]"))
+    (org-clock-projects-test-with-choice "a/client/tasks"
+      (org-clock-projects-switch)
+      (should (equal (org-clock-projects-test-candidates)
+                     '("a/client/tasks" "b/client/tasks"))))
+    (should (equal (org-clock-projects-test-active-heading) "A one"))))
+
+(ert-deftest org-clock-projects-test-the-exit-option-is-read-when-asked ()
+  "Turning the option off should take effect without cycling the mode."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(org-clock-projects-test-clock-at
+                         "A one" (org-clock-projects-test-hour 9))))
+    (let ((org-clock-ask-before-exiting nil))
+      (org-clock-projects-test-with-answers '()
+        (should (eq (org-clock-projects-kill-emacs-query) t))
+        (should (equal (org-clock-projects-test-questions) '())))
+      ;; And the clock is left exactly as it was.
+      (should (= (length (org-clock-projects-test-open-lines "alpha.org")) 1)))
+    (let ((org-clock-ask-before-exiting t))
+      (org-clock-projects-test-with-answers '(t)
+        (org-clock-projects-kill-emacs-query)
+        (should (= (length (org-clock-projects-test-questions)) 1))))
+    (should (equal (org-clock-projects-test-open-lines "alpha.org") '()))))
+
 (provide 'org-clock-projects-test)
 ;;; org-clock-projects-test.el ends here

@@ -100,6 +100,13 @@ restart and never offered again. For the same reason the scan widens: Org's own
 search starts at =point-min= and respects narrowing, and a narrowed project
 buffer would otherwise hide its clocks from all of it at once.
 
+Whether you are asked at all stays yours, through Org's own
+=org-clock-ask-before-exiting=; this only changes which question is asked.
+Turning that option off takes effect immediately. Turning it *on* through
+Customize while the mode is running installs Org's query alongside this one,
+because Customize manages Org's hook and not this one — toggle the mode to
+resynchronise.
+
 * Notes on the implementation
 
 The set of open clocks is read back from the files whenever it is needed and

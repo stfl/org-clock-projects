@@ -141,22 +141,41 @@ base buffer."
     (org-clock-projects--truename
      (buffer-file-name (or (buffer-base-buffer buffer) buffer)))))
 
+(defun org-clock-projects--trailing (file depth)
+  "Return the last DEPTH path components of FILE, the last one sans extension.
+Stops at the root, so a DEPTH beyond the path's own length renders the
+whole of it."
+  (let ((parts (list (file-name-base file)))
+        (rest (directory-file-name (or (file-name-directory file) ""))))
+    (while (and (< (length parts) depth)
+                (not (member rest '("" "/" "."))))
+      (push (file-name-nondirectory rest) parts)
+      (setq rest (directory-file-name (or (file-name-directory rest) ""))))
+    (string-join parts "/")))
+
 (defun org-clock-projects-name (project)
   "Return the display name of PROJECT.
-The base name, qualified by its directory when another candidate file
-shares it.  The resolver may draw from any registry, so two projects
-whose files are named alike is a legal arrangement rather than damage,
-and one name for both would make them indistinguishable in the switcher,
-in the modeline and at every prompt."
-  (let ((base (file-name-base project)))
-    (if (< 1 (seq-count (lambda (candidate)
-                          (equal base (file-name-base candidate)))
-                        (org-clock-projects--candidate-files)))
-        (format "%s/%s"
-                (file-name-nondirectory
-                 (directory-file-name (or (file-name-directory project) "")))
-                base)
-      base)))
+The base name, extended leftwards with as many enclosing directories as
+it takes to tell it from every other candidate.  The resolver may draw
+from any registry, so two project files named alike is a legal
+arrangement rather than damage, and one name for both would make them
+indistinguishable in the switcher, in the modeline and at every prompt.
+Qualifying by a single directory is not enough: the directories can be
+named alike too."
+  (let ((candidates (org-clock-projects--candidate-files))
+        (depth 1)
+        name previous)
+    (while (progn
+             (setq name (org-clock-projects--trailing project depth))
+             (and (not (equal name previous))
+                  (< 1 (seq-count
+                        (lambda (candidate)
+                          (equal name (org-clock-projects--trailing
+                                       candidate depth)))
+                        candidates))))
+      (setq previous name
+            depth (1+ depth)))
+    name))
 
 (defun org-clock-projects--scope (file)
   "Return the created project owning FILE, or nil.
@@ -834,12 +853,17 @@ project, returning the session to its untouched state."
 
 ;;;###autoload
 (defun org-clock-projects-kill-emacs-query ()
-  "Ask about each open clock when Emacs is killed.
+  "Ask about each open clock when Emacs is killed, and return t.
 This replaces `org-clock-kill-emacs-query', which only ever inspects the
 active clock and so sees nothing when none is active.  Clocks left open
 are still there after a restart, because open clocks are read back from
-the files.  Always returns t, as `kill-emacs-query-functions' requires."
-  (dolist (entry (org-clock-projects-open-clocks))
+the files.
+
+`org-clock-ask-before-exiting' is consulted here rather than only when
+this was installed, so turning it off takes effect without cycling the
+mode."
+  (when org-clock-ask-before-exiting
+    (dolist (entry (org-clock-projects-open-clocks))
     (let* ((clock (org-clock-projects--entry-clock entry))
            (buffer (marker-buffer (car clock))))
       (when (and (buffer-live-p buffer)
@@ -850,7 +874,7 @@ the files.  Always returns t, as `kill-emacs-query-functions' requires."
                           (org-clock-projects--clock-description clock))))
         (org-clock-projects--clock-out clock)
         (with-current-buffer buffer
-          (when (buffer-file-name) (save-buffer))))))
+          (when (buffer-file-name) (save-buffer)))))))
   t)
 
 
