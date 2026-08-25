@@ -1,0 +1,123 @@
+#+title: org-clock-projects
+
+Per-project parallel Org clocks, with a switcher for the ones that are running.
+
+Org tracks exactly one clock. Work spanning several concurrent engagements does
+not fit that: switching from one to another means clocking out of the first,
+and there is no way to leave it running while attending to the second.
+
+* What it adds
+
+A *clock project* is an Org file that owns at most one open clock and its own
+last clock-out time. Several projects hold open clocks at once; exactly one of
+them is Org's active clock at any moment, so every stock Org clock command
+keeps working and operates on that one.
+
+Crossing a project boundary is always explicit — either the fork command, or
+answering the prompt a plain =org-clock-in= raises when it targets a different
+project. Switching to a project restores that project's own clock-out time
+before the continuation logic runs, so continuation is scoped to the engagement
+rather than to the session: clocking out of one client and into another never
+backdates the new clock to the first one's clock-out.
+
+Clock lines are written by Org's own primitives and are indistinguishable from
+ordinary ones, so clocktables, reports and CSV export need no changes.
+
+* Dormant until used
+
+A project exists only after it is created — by the fork command, or by
+answering yes at the boundary prompt. Visiting or clocking in a file never
+enrols it. While no project exists, every path defers to stock Org: no prompt,
+no constraint, and an empty modeline segment.
+
+* Commands
+
+| Command                          | What it does                                                          |
+|----------------------------------+-----------------------------------------------------------------------|
+| =org-clock-projects-fork=          | Clock in at point, leaving the current project's clock running         |
+| =org-clock-projects-switch=        | Make one of the open clocks active and jump to it                      |
+| =org-clock-projects-clock-out-all= | Clock out of every open clock                                          |
+| =org-clock-projects-clear=         | Forget a project's session state; =C-u= for every project                |
+| =org-clock-projects-kill-emacs-query= | Ask about each open clock on exit; installed by the mode            |
+
+The switcher jumps straight to a single open clock without prompting, making it
+active first if it is not, and falls back to =org-clock-goto= when none is open.
+With several it offers project names through =completing-read=, annotated with
+each clock's heading, start time and running duration.
+
+The modeline gains =⏱ <project> [+n]=, where =n= counts the *other* open clocks and
+is shown only when non-zero. Org's own active-clock display is untouched.
+
+* Setup
+
+#+begin_src emacs-lisp
+(use-package org-clock-projects
+  :after org
+  :config
+  (setq org-clock-projects-files '("client-a.org" "client-b.org"))
+  (org-clock-projects-mode 1))
+#+end_src
+
+Names in =org-clock-projects-files= are expanded against =org-directory=. To drive
+the list from a project registry you already keep, set
+=org-clock-projects-files-function= to a function returning it — the package has
+no dependency on any particular registry:
+
+#+begin_src emacs-lisp
+(setq org-clock-projects-files-function #'my-project-files)
+#+end_src
+
+=org-clock-projects-continue-threshold= (30 minutes) is the gap below which a
+project's clock-out time is resumed silently; above it you are asked.
+
+** Required Org setting
+
+#+begin_src emacs-lisp
+(setq org-clock-auto-clock-resolution nil)
+#+end_src
+
+With parallel clocks, dangling clock lines are the normal state. Org's
+automatic resolution otherwise prompts about other projects on every clock-in
+made while no clock is running. Idle-based resolution is unaffected.
+
+* Notes on the implementation
+
+The set of open clocks is read back from the files whenever it is needed and
+never cached, so clocks left open across a restart, or started by another tool,
+are still visible.
+
+A clock's scope is derived from its file rather than recorded at clock-in time,
+so nothing has to be remembered per clock and scope survives a restart. The
+current project is a session pointer that outlives its clocks; stored clock-out
+times are session-lifetime, matching Org's own handling of the global one.
+
+Clocking out does not promote another clock to active. Promotion re-creates the
+problem it appears to solve: with a promoted clock active, the next plain
+clock-in treats it as the clock being interrupted and closes it. The one
+exception is =org-clock-projects-clear=, which activates the clock it leaves
+without a home.
+
+Clock-outs this package performs never ask for a note, and pass no end time so
+that Org applies the configured rounding itself. Org rounds clock-*in* down and
+clock-*out* to nearest; that asymmetry is inherited deliberately.
+
+One place departs from Org's clock vocabulary. =org-is-active-clock= compares
+marker positions alone, which Org can afford because it never holds two clocks
+at once. With parallel clocks in different files, two markers at the same
+character offset compare equal, and a clock-out then lands in the wrong file.
+=org-clock-projects--active-clock-p= compares the buffer as well, and
+=org-clock-projects--clock-out= is =org-clock-clock-out= with that substitution.
+
+* Tests
+
+#+begin_src sh
+emacs -Q --batch -L . -l ert -l test/org-clock-projects-test.el \
+      --eval "(ert-run-tests-batch-and-exit t)"
+#+end_src
+
+Tests assert only externally observable state: the text of the clock lines in
+the fixture files, which clock Org considers active, the current project, the
+modeline string, and which questions a flow asked. Several flows ask two or
+three questions in sequence, so the harness takes a queue of scripted answers
+and fails on a question the queue did not anticipate — how many questions a
+flow asks, and in what order, is a tested property rather than an accident.
