@@ -256,20 +256,48 @@ stfl/doom.d#5, to be dropped if Org takes a fix."
     (org-back-to-heading t)
     (org-get-heading t t t t)))
 
+(defun org-clock-projects--resumable-p (clock)
+  "Return non-nil when Org can resume CLOCK's line in place.
+`org-find-open-clocks' accepts any inactive timestamp, and the element
+parser calls the line a clock, but Org's resume branch demands a full
+`[YYYY-MM-DD DDD HH:MM]'.  A line the reader accepts and the resume
+branch rejects is answered with a *new* clock line rather than a resumed
+one, which would leave the scope holding two."
+  (org-with-clock-position clock
+    (looking-at (concat "^[ \t]*" org-clock-string
+                        " \\[[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}"
+                        " *\\sw+ +[012][0-9]:[0-5][0-9]\\][ \t]*$"))))
+
 (defun org-clock-projects--activate (clock &optional parallel)
-  "Make CLOCK Org's active clock.
+  "Make CLOCK Org's active clock, and return non-nil when it becomes so.
 This is Org's own clock-in with resume enabled: it reads the start time
 back out of the existing clock line, restores effort and accumulated
 total, and writes no new clock line.  With PARALLEL non-nil the clock
-that was active is left open rather than stopped."
-  (unless (org-clock-projects--active-clock-p clock)
-    (let ((org-clock-resolving-clocks-due-to-idleness parallel)
-          ;; Resuming a clock this package located must never raise Org's
-          ;; dangling-clock prompt; Org binds this the same way in
-          ;; `org-clock-resolve-clock'.
-          (org-clock-auto-clock-resolution nil)
-          (org-clock-projects--inhibit t))
-      (org-clock-clock-in clock t))))
+that was active is left open rather than stopped.
+
+A clock whose line Org cannot resume is reported and left alone, because
+the alternative is Org quietly writing a second clock beside it."
+  (if (org-clock-projects--active-clock-p clock)
+      t
+    (if (not (org-clock-projects--resumable-p clock))
+        (progn
+          (display-warning
+           'org-clock-projects
+           (format "Cannot resume the clock on %s: its clock line carries no start time"
+                   (org-clock-projects--clock-heading clock)))
+          nil)
+      (org-clock-projects--activate-1 clock parallel)
+      t)))
+
+(defun org-clock-projects--activate-1 (clock parallel)
+  "Hand CLOCK to Org as the active clock.  See `org-clock-projects--activate'."
+  (let ((org-clock-resolving-clocks-due-to-idleness parallel)
+        ;; Resuming a clock this package located must never raise Org's
+        ;; dangling-clock prompt; Org binds this the same way in
+        ;; `org-clock-resolve-clock'.
+        (org-clock-auto-clock-resolution nil)
+        (org-clock-projects--inhibit t))
+    (org-clock-clock-in clock t)))
 
 (defun org-clock-projects--clock-out (clock &optional at-time)
   "Clock out of CLOCK at AT-TIME, without prompting for a note.
@@ -466,9 +494,9 @@ one-clock-per-project invariant are decided here."
         ;; within one file.
         (dolist (clock (butlast existing))
           (org-clock-projects--clock-out clock))
-        (org-clock-projects--activate (car (last existing)) parallel)
-        ;; Org must now stop the clock it has just been handed.
-        (setq parallel nil)))
+        (when (org-clock-projects--activate (car (last existing)) parallel)
+          ;; Org must now stop the clock it has just been handed.
+          (setq parallel nil))))
     (setq org-clock-projects--current target)
     (unwind-protect
         (prog1
@@ -592,11 +620,19 @@ it is not.  With none, this falls back to `org-clock-goto'."
   (let ((clock (org-clock-projects--entry-clock entry)))
     ;; Every other open clock stays open: this switches which one Org considers
     ;; active, it does not end anything.
-    (org-clock-projects--activate clock t)
-    (setq org-clock-projects--current
-          (org-clock-projects--scope (org-clock-projects--entry-file entry)))
-    (org-clock-projects--update-mode-line)
-    (org-clock-goto)))
+    (let ((active (org-clock-projects--activate clock t)))
+      (setq org-clock-projects--current
+            (org-clock-projects--scope (org-clock-projects--entry-file entry)))
+      (org-clock-projects--update-mode-line)
+      (if active
+          (org-clock-goto)
+        ;; It could not be made active, so go to it directly rather than to
+        ;; whichever clock still is.
+        (pop-to-buffer-same-window (marker-buffer (car clock)))
+        (widen)
+        (goto-char (car clock))
+        (org-back-to-heading t)
+        (org-fold-show-context)))))
 
 (defun org-clock-projects--annotation (entry)
   "Return the annotation for open-clock ENTRY: heading, start and duration."

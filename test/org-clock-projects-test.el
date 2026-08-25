@@ -1492,5 +1492,27 @@ boundary prompt for that file ever after."
     (should (equal (org-clock-projects-test-lines "gamma.org") '()))))
 
 
+(ert-deftest org-clock-projects-test-an-unresumable-clock-line-is-not-doubled ()
+  "Org reads a clock line more loosely than it resumes one.
+A line without a start time is found by the reader, and the element
+parser calls it a clock, but Org's resume branch rejects it and answers
+with a *new* clock line instead — leaving the project holding two."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(format "* TODO A one\n:LOGBOOK:\nCLOCK: %s\n:END:\n"
+                                (format-time-string
+                                 "[%Y-%m-%d %a]"
+                                 (org-clock-projects-test-time)))))
+    (let (warnings)
+      (cl-letf (((symbol-function 'display-warning)
+                 (lambda (_type message &rest _) (push message warnings))))
+        (org-clock-projects-test-with-choice nil
+          (org-clock-projects-switch)))
+      (should (= (length warnings) 1))
+      (should (string-match-p "A one" (car warnings))))
+    ;; The one line it started with, and no second one written beside it.
+    (should (= (length (org-clock-projects-test-lines "alpha.org")) 1))
+    (should-not (org-clock-is-active))))
+
 (provide 'org-clock-projects-test)
 ;;; org-clock-projects-test.el ends here

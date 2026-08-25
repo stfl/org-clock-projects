@@ -143,6 +143,14 @@ character offset compare equal, and a clock-out then lands in the wrong file.
 =org-clock-projects--active-clock-p= compares the buffer as well, and
 =org-clock-projects--clock-out= is =org-clock-clock-out= with that substitution.
 
+Org reads a clock line more loosely than it resumes one. =org-find-open-clocks=
+accepts any inactive timestamp and the element parser calls the line a clock,
+but the resume branch demands a full =[YYYY-MM-DD DDD HH:MM]= — so a hand-edited
+=CLOCK: [2026-08-25 Tue]=, or a single-digit hour, is found and then answered with
+a *new* clock line beside it rather than a resumed one. Such a line is reported
+and left alone instead, since the alternative is one open clock silently
+becoming two.
+
 One Org behaviour is inherited rather than worked around: =org-clock-in= stops the
 running clock before it writes the new clock line, so a clock-in that then fails
 — on a read-only buffer, say — leaves nothing running. Stock Org does the same.
