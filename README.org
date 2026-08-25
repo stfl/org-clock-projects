@@ -176,7 +176,14 @@ emacs -Q --batch -L . -l ert -l test/org-clock-projects-test.el \
 
 Tests assert only externally observable state: the text of the clock lines in
 the fixture files, which clock Org considers active, the current project, the
-modeline string, and which questions a flow asked. Several flows ask two or
+modeline string, and which questions a flow asked.
+
+Where this package mirrors an Org internal, the test asks Org rather than
+pinning down the answer. The set of clock timestamps Org resumes in place is
+one such: each shape is handed to Org with the package out of the way, and the
+switcher is required to agree with whatever Org did. That catches the guard
+drifting in either direction, and stays correct if Org ever changes the
+pattern. Several flows ask two or
 three questions in sequence, so the harness takes a queue of scripted answers
 and fails on a question the queue did not anticipate — how many questions a
 flow asks, and in what order, is a tested property rather than an accident.

@@ -1553,40 +1553,64 @@ previous clock runs, and every minute after that is billed to it."
     ;; But point is on the line that needs repairing.
     (should (equal (file-name-nondirectory (buffer-file-name)) "alpha.org"))))
 
-(ert-deftest org-clock-projects-test-every-unresumable-shape-is-refused ()
-  "The reader and the resume branch disagree in more than one way.
-`org-find-open-clocks' matches any inactive timestamp, while Org resumes
-only `[YYYY-MM-DD DDD HH:MM]' — no missing time, no single-digit hour, no
-repeater or warning cookie, and not a range that is already closed.  Each
-of those is found, and each would be answered with a second clock line.
-The abbreviating dot after a day name is the one that looks broken and is
-not."
-  (dolist (case '(("[2026-08-25 Di]"           . refuse)
-                  ("[2026-08-25 Di 9:00]"      . refuse)
-                  ("[2026-08-25 Di 09:00 +1d]" . refuse)
-                  ("[2026-08-25 Di 09:00 -0d]" . refuse)
-                  ("[2026-08-25 Di 09:00]--[2026-08-25 Di 10:00]" . refuse)
-                  ;; The abbreviating dot is not damage: Org resumes it, so
-                  ;; this must too.  Refusing it would be a stricter test than
-                  ;; the branch that actually decides.
-                  ("[2026-08-25 Di. 09:00]"    . resume)
-                  ("[2026-08-25 Di 09:00]"     . resume)))
-    (org-clock-projects-test-with-data
-        org-clock-projects-test-files
-        `(("alpha.org" . ,(format "* TODO A one\n:LOGBOOK:\nCLOCK: %s\n:END:\n"
-                                  (car case)))
-          ("beta.org" . ,(org-clock-projects-test-entry "B one")))
-      (org-clock-projects-test-with-answers '()
-        (org-clock-projects-test-fork "beta.org" "B one"))
-      (org-clock-projects-test-advance 30)
-      (org-clock-projects-test-with-choice "alpha"
-        (if (eq (cdr case) 'refuse)
-            (should-error (org-clock-projects-switch) :type 'user-error)
-          (org-clock-projects-switch)))
-      ;; Whichever way it went, the file still holds exactly the one line.
-      (should (equal (length (org-clock-projects-test-lines "alpha.org")) 1))
-      (should (equal (org-clock-projects-test-active-file)
-                     (if (eq (cdr case) 'refuse) "beta.org" "alpha.org"))))))
+(defconst org-clock-projects-test-clock-shapes
+  '("[2026-08-25 Di 09:00]"                       ; plain
+    "[2026-08-25 Di. 09:00]"                      ; abbreviating dot
+    "[2026-08-25 Mittwoch 09:00]"                 ; full day name
+    "[2026-08-25 Di 00:00]"                       ; midnight
+    "[2026-08-25 Di 23:59]"                       ; last minute of the day
+    "[2026-08-25 Di 9:00]"                        ; single-digit hour
+    "[2026-08-25 Di]"                             ; no time at all
+    "[2026-08-25 09:00]"                          ; no day name
+    "[2026-08-25 Di 09:00 +1d]"                   ; repeater
+    "[2026-08-25 Di 09:00 -0d]"                   ; warning cookie
+    "[2026-08-25 Di 09:00]--[2026-08-25 Di 10:00]") ; already closed
+  "Clock timestamps `org-find-open-clocks' reports as open.
+Org resumes some of these in place and answers the rest with a *new*
+clock line.  Which is which is deliberately not recorded here.")
+
+(defun org-clock-projects-test--org-resumes-p (stamp)
+  "Return non-nil when Org resumes a clock line carrying STAMP in place.
+Org is asked rather than predicted: the clock is handed to it with this
+package out of the way, and the answer is whether a clock line appeared."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(format "* TODO A one\n:LOGBOOK:\nCLOCK: %s\n:END:\n"
+                                stamp)))
+    (org-clock-projects-mode -1)
+    (let ((before (length (org-clock-projects-test-lines "alpha.org")))
+          (clock (car (org-find-open-clocks
+                       (expand-file-name "alpha.org" org-directory)))))
+      (when clock
+        (ignore-errors (org-clock-clock-in clock t))
+        (= before (length (org-clock-projects-test-lines "alpha.org")))))))
+
+(ert-deftest org-clock-projects-test-the-guard-follows-org ()
+  "Whether a clock line can be resumed is Org's answer, not this package's.
+The guard mirrors the regexp in `org-clock-in's resume branch, so it can
+drift if Org ever changes it.  Rather than pin down which shapes it
+accepts, each one is put to Org directly and the switcher is required to
+agree: it goes through when Org would resume the line, and refuses when
+Org would write a second one instead."
+  (dolist (stamp org-clock-projects-test-clock-shapes)
+    (let ((org-resumes (org-clock-projects-test--org-resumes-p stamp)))
+      (org-clock-projects-test-with-data
+          org-clock-projects-test-files
+          `(("alpha.org" . ,(format "* TODO A one\n:LOGBOOK:\nCLOCK: %s\n:END:\n"
+                                    stamp))
+            ("beta.org" . ,(org-clock-projects-test-entry "B one")))
+        (org-clock-projects-test-with-answers '()
+          (org-clock-projects-test-fork "beta.org" "B one"))
+        (org-clock-projects-test-advance 30)
+        (let ((switched (org-clock-projects-test-with-choice "alpha"
+                          (condition-case nil
+                              (progn (org-clock-projects-switch) t)
+                            (user-error nil)))))
+          (should (eq switched (and org-resumes t)))
+          ;; Either way, no second clock line was written beside the first.
+          (should (= (length (org-clock-projects-test-lines "alpha.org")) 1))
+          (should (equal (org-clock-projects-test-active-file)
+                         (if switched "alpha.org" "beta.org"))))))))
 
 (provide 'org-clock-projects-test)
 ;;; org-clock-projects-test.el ends here
