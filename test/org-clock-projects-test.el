@@ -170,6 +170,7 @@ With MINUTES-AGO, the entry carries an open clock started then."
           (org-clock-projects-continue-threshold 30)
           (org-clock-projects--projects nil)
           (org-clock-projects--current nil)
+          (org-clock-projects--unscoped-out-time nil)
           ;; Rounding is a property under test, so it is off unless a test
           ;; turns it on.
           (org-clock-rounding-minutes 0)
@@ -1222,6 +1223,274 @@ end back past its own start, which is how a bad duration actually arises."
       (org-clock-projects-test-fork "beta.org" "B one")
       (should-error (org-clock-projects-test-fork "alpha.org" "A one")
                     :type 'user-error))))
+
+;;;; Damage repair
+;;
+;; A project holding more than one open clock is not a state this package
+;; creates: it comes from a crash, or an exit query that was declined.  Every
+;; path that can see a surplus clock has to be able to close it, or it is
+;; permanent.
+
+(defun org-clock-projects-test-two-dangling ()
+  "Return a file holding two entries whose clocks were both left open."
+  (concat (org-clock-projects-test-clock-at
+           "A one" (org-clock-projects-test-hour 9))
+          (org-clock-projects-test-clock-at
+           "A two" (org-clock-projects-test-hour 10))))
+
+(ert-deftest org-clock-projects-test-clock-out-all-closes-a-surplus-clock ()
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(org-clock-projects-test-two-dangling)))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-clock-out-all))
+    (should (equal (org-clock-projects-test-open-lines "alpha.org") '()))
+    (should (= (length (org-clock-projects-test-closed-lines "alpha.org")) 2))))
+
+(ert-deftest org-clock-projects-test-exit-query-offers-a-surplus-clock ()
+  "The exit query is the last line of defence: a clock it never offers is kept."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(org-clock-projects-test-two-dangling))
+        ("beta.org" . ,(org-clock-projects-test-entry "B one")))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "beta.org" "B one"))
+    (org-clock-projects-test-advance 60)
+    (org-clock-projects-test-with-answers '(t t t)
+      (org-clock-projects-kill-emacs-query)
+      (should (= (length (org-clock-projects-test-questions)) 3)))
+    (should (equal (org-clock-projects-test-open-lines "alpha.org") '()))
+    (should (equal (org-clock-projects-test-open-lines "beta.org") '()))))
+
+(ert-deftest org-clock-projects-test-clocking-in-repairs-a-surplus-clock ()
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(concat (org-clock-projects-test-two-dangling)
+                                (org-clock-projects-test-entry "A three")))
+        ("beta.org" . ,(org-clock-projects-test-entry "B one")))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "beta.org" "B one"))
+    (org-clock-projects-test-advance 60)
+    ;; Stop beta, enrol alpha.
+    (org-clock-projects-test-with-answers '(t t)
+      (org-clock-projects-test-clock-in "alpha.org" "A three"))
+    (should (= (length (org-clock-projects-test-open-lines "alpha.org")) 1))
+    (should (= (length (org-clock-projects-test-closed-lines "alpha.org")) 2))
+    (should (equal (org-clock-projects-test-active-heading) "A three"))))
+
+(ert-deftest org-clock-projects-test-fork-closes-every-clock-the-project-holds ()
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(org-clock-projects-test-two-dangling)))
+    (org-clock-projects-test-with-answers '(t)
+      (org-clock-projects-test-fork "alpha.org" "A two")
+      (should (string-match-p "2 open clocks"
+                              (car (org-clock-projects-test-questions)))))
+    (should (= (length (org-clock-projects-test-closed-lines "alpha.org")) 2))
+    (should (= (length (org-clock-projects-test-open-lines "alpha.org")) 1))
+    ;; Started, not resumed: leaving the clock at point open would make Org
+    ;; read this as a continuation and write nothing at all.
+    (should (equal (org-clock-projects-test-start-of
+                    (car (org-clock-projects-test-open-lines "alpha.org")))
+                   (org-clock-projects-test-stamp)))))
+
+(ert-deftest org-clock-projects-test-a-file-listed-twice-counts-once ()
+  (org-clock-projects-test-with-data
+      '("alpha.org" "alpha.org" "beta.org")
+      `(("alpha.org" . ,(org-clock-projects-test-entry "A one"))
+        ("beta.org" . ,(org-clock-projects-test-entry "B one")))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "alpha.org" "A one")
+      (org-clock-projects-test-advance 30)
+      (org-clock-projects-test-fork "beta.org" "B one"))
+    (should (equal org-clock-projects-mode-line-string "⏱ beta [+1]"))))
+
+
+;;;; Clocks running in the background
+;;
+;; `org-with-clock' redirects the marker, but `org-clock-out' tears down the
+;; display, the timers and the remembered task of *the* clock.
+
+(ert-deftest org-clock-projects-test-a-background-clock-out-spares-the-running-clock ()
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(org-clock-projects-test-entry "A one"))
+        ("beta.org" . ,(org-clock-projects-test-entry "B one")))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "alpha.org" "A one")
+      (org-clock-projects-test-advance 30)
+      (org-clock-projects-test-fork "beta.org" "B one"))
+    (should (memq 'org-mode-line-string global-mode-string))
+    (org-clock-projects-test-advance 30)
+    (org-clock-projects-test-with-choice "alpha"
+      (org-clock-projects-test-with-answers '(t)
+        (org-clock-projects-clear)))
+    (should (equal (org-clock-projects-test-active-heading) "B one"))
+    (should (equal org-clock-current-task "B one"))
+    (should (memq 'org-mode-line-string global-mode-string))))
+
+(ert-deftest org-clock-projects-test-the-running-task-is-still-recognised ()
+  "Forgetting the running task makes Org split its clock line instead of
+recognising a clock-in on it as the same clock."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(org-clock-projects-test-entry "A one"))
+        ("beta.org" . ,(org-clock-projects-test-entry "B one")))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "alpha.org" "A one")
+      (org-clock-projects-test-advance 30)
+      (org-clock-projects-test-fork "beta.org" "B one"))
+    (org-clock-projects-test-advance 30)
+    (org-clock-projects-test-with-choice "alpha"
+      (org-clock-projects-test-with-answers '(t)
+        (org-clock-projects-clear)))
+    (org-clock-projects-test-advance 30)
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-clock-in "beta.org" "B one"))
+    (should (equal (org-clock-projects-test-closed-lines "beta.org") '()))
+    (should (= (length (org-clock-projects-test-open-lines "beta.org")) 1))))
+
+
+;;;; Arithmetic across a boundary
+
+(ert-deftest org-clock-projects-test-crossing-a-boundary-leaves-no-overlap ()
+  "Rounding must not bill one interval to two clients.
+The end is rounded to nearest and a fresh start is rounded down, so a
+clock-in that computes its own start opens a gap backwards over the end
+just written."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(org-clock-projects-test-entry "A one"))
+        ("beta.org" . ,(org-clock-projects-test-entry "B one")))
+    (setq org-clock-rounding-minutes 15)
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "alpha.org" "A one"))
+    (org-clock-projects-test-advance 38)
+    (org-clock-projects-test-with-answers '(t t)
+      (org-clock-projects-test-clock-in "beta.org" "B one"))
+    (should (equal (org-clock-projects-test-end-of
+                    (car (org-clock-projects-test-closed-lines "alpha.org")))
+                   (org-clock-projects-test-start-of
+                    (car (org-clock-projects-test-open-lines "beta.org")))))))
+
+(ert-deftest org-clock-projects-test-unscoped-work-keeps-its-own-time ()
+  "A project's clock-out must not flow into a file left unenrolled."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(org-clock-projects-test-entry "A one"))
+        ("gamma.org" . ,(org-clock-projects-test-entry "G one")))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "alpha.org" "A one")
+      (org-clock-projects-test-advance 60)
+      (org-clock-out))
+    (let ((alpha-end (org-clock-projects-test-end-of
+                      (car (org-clock-projects-test-closed-lines "alpha.org")))))
+      (org-clock-projects-test-advance 20)
+      ;; gamma is another client's file; decline to enrol it.
+      (org-clock-projects-test-with-answers '(nil)
+        (org-clock-projects-test-clock-in "gamma.org" "G one")
+        (should (= (length (org-clock-projects-test-questions)) 1)))
+      (let ((gamma-start (org-clock-projects-test-start-of
+                          (car (org-clock-projects-test-open-lines "gamma.org")))))
+        (should-not (equal gamma-start alpha-end))
+        (should (equal gamma-start (org-clock-projects-test-stamp)))))))
+
+(ert-deftest org-clock-projects-test-the-last-clock-out-prefix-stays-in-project ()
+  "`C-u C-u C-u' starts from the last clock-out — this project's own."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(org-clock-projects-test-entry "A one"))
+        ("beta.org" . ,(org-clock-projects-test-entry "B one")))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "alpha.org" "A one")
+      (org-clock-projects-test-advance 60)
+      (org-clock-out))
+    (let ((alpha-end (org-clock-projects-test-end-of
+                      (car (org-clock-projects-test-closed-lines "alpha.org")))))
+      (org-clock-projects-test-advance 90)
+      (org-clock-projects-test-with-answers '(t)
+        (save-current-buffer
+          (org-clock-projects-test-goto "beta.org" "B one")
+          (org-clock-in '(64))))
+      (let ((beta-start (org-clock-projects-test-start-of
+                         (car (org-clock-projects-test-open-lines "beta.org")))))
+        (should-not (equal beta-start alpha-end))
+        (should (equal beta-start (org-clock-projects-test-stamp)))))))
+
+(ert-deftest org-clock-projects-test-the-threshold-measures-elapsed-time ()
+  "`org-time-stamp-rounding-minutes' governs `C-c .', not the clock."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(concat (org-clock-projects-test-entry "A one")
+                                (org-clock-projects-test-entry "A two"))))
+    (setq org-time-stamp-rounding-minutes '(30 5))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "alpha.org" "A one")
+      (org-clock-projects-test-advance 31)
+      (org-clock-out))
+    ;; 43 minutes is well above the threshold, so it is asked about.
+    (org-clock-projects-test-advance 43)
+    (org-clock-projects-test-with-answers '(nil)
+      (org-clock-projects-test-clock-in "alpha.org" "A two")
+      (should (= (length (org-clock-projects-test-questions)) 1))
+      (should (string-match-p "(-43m)" (car (org-clock-projects-test-questions)))))
+    (should (equal (org-clock-projects-test-start-of
+                    (car (org-clock-projects-test-open-lines "alpha.org")))
+                   (org-clock-projects-test-stamp)))))
+
+(ert-deftest org-clock-projects-test-a-chosen-start-time-is-not-overridden ()
+  "The shape `stfl/org-clock-in-at' uses: clock out at a time, then clock in at it."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(concat (org-clock-projects-test-clock-at
+                                 "A one" (org-clock-projects-test-hour 9))
+                                (org-clock-projects-test-entry "A two")))
+        ("beta.org" . ,(org-clock-projects-test-entry "B one")))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "beta.org" "B one"))
+    ;; 14:00 now; the user types 13:00.
+    (org-clock-projects-test-at (org-clock-projects-test-hour 14)
+      (let ((chosen (org-clock-projects-test-hour 13)))
+        (org-clock-projects-test-with-answers '(t)
+          ;; Faithful to the caller: it binds `org-clock-continuously' from
+          ;; `org-clocking-p', clocks out at the time, then clocks in at it.
+          (let ((org-clock-continuously (org-clocking-p)))
+            (org-clock-out nil nil chosen)
+            (save-current-buffer
+              (org-clock-projects-test-goto "alpha.org" "A two")
+              (org-clock-in nil chosen))))
+        ;; The typed time is what was written, and the clock it replaced ends
+        ;; there too rather than at now.
+        (should (equal (org-clock-projects-test-start-of
+                        (car (org-clock-projects-test-open-lines "alpha.org")))
+                       (format-time-string (org-time-stamp-format 'with-time t)
+                                           chosen)))
+        (should (equal (org-clock-projects-test-end-of
+                        (car (org-clock-projects-test-closed-lines "alpha.org")))
+                       (format-time-string (org-time-stamp-format 'with-time t)
+                                           chosen)))
+        (should (= (length (org-clock-projects-test-open-lines "alpha.org")) 1))))))
+
+(ert-deftest org-clock-projects-test-a-failed-clock-in-creates-no-project ()
+  "A project created for a clock-in that never happened would suppress the
+boundary prompt for that file ever after."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-files
+      `(("alpha.org" . ,(org-clock-projects-test-entry "A one"))
+        ("gamma.org" . ,(org-clock-projects-test-entry "G one")))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "alpha.org" "A one"))
+    (org-clock-projects-test-advance 30)
+    (with-current-buffer (org-clock-projects-test-buffer "gamma.org")
+      (setq buffer-read-only t))
+    (org-clock-projects-test-with-answers '(t t)
+      (should-error
+       (save-current-buffer
+         (org-clock-projects-test-goto "gamma.org" "G one")
+         (org-clock-in))))
+    (should (equal (org-clock-projects-test-current) "alpha"))
+    (should (equal (org-clock-projects-test-lines "gamma.org") '()))))
+
 
 (provide 'org-clock-projects-test)
 ;;; org-clock-projects-test.el ends here

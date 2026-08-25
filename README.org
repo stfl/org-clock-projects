@@ -43,7 +43,8 @@ no constraint, and an empty modeline segment.
 The switcher jumps straight to a single open clock without prompting, making it
 active first if it is not, and falls back to =org-clock-goto= when none is open.
 With several it offers project names through =completing-read=, annotated with
-each clock's heading, start time and running duration.
+each clock's heading, start time and running duration. A project holding more
+than one open clock names each by its heading, so the surplus can be picked out.
 
 The modeline gains =⏱ <project> [+n]=, where =n= counts the *other* open clocks and
 is shown only when non-zero. Org's own active-clock display is untouched.
@@ -80,6 +81,19 @@ With parallel clocks, dangling clock lines are the normal state. Org's
 automatic resolution otherwise prompts about other projects on every clock-in
 made while no clock is running. Idle-based resolution is unaffected.
 
+* Repairing damage
+
+A project holding more than one open clock is not a state this package creates.
+It comes from a crash, or from an exit query that was declined. Every path that
+opens or closes a clock can see the whole set, so the surplus can always be
+reached: =org-clock-projects-clock-out-all= and the exit query cover every one of
+them, clocking in on a project closes whatever it was already holding, and the
+fork command says how many it is about to close.
+
+Reporting one clock per file instead would leave the rest invisible to exactly
+the commands that exist to close them, and therefore permanent — surviving every
+restart and never offered again.
+
 * Notes on the implementation
 
 The set of open clocks is read back from the files whenever it is needed and
@@ -97,9 +111,30 @@ clock-in treats it as the clock being interrupted and closes it. The one
 exception is =org-clock-projects-clear=, which activates the clock it leaves
 without a home.
 
-Clock-outs this package performs never ask for a note, and pass no end time so
-that Org applies the configured rounding itself. Org rounds clock-*in* down and
-clock-*out* to nearest; that asymmetry is inherited deliberately.
+Continuation is decided per scope, and unscoped work is a scope like any other:
+it keeps its own clock-out time rather than reading Org's session-wide one,
+which would otherwise carry a project's clock-out into a file left unenrolled.
+
+A clock stopped by the very clock-in that starts the next one hands its time
+straight over, whichever projects the two belong to. There is no gap to
+misattribute, and letting Org compute a fresh start instead would round it
+*down* below the end just rounded *up* and bill one rounding interval to both.
+A gap only opens when no clock is ending, and then only the target's own stored
+clock-out time can close it.
+
+Clock-outs this package performs never ask for a note. They pass no end time, so
+Org applies the configured rounding itself — except when the caller fixed the
+new clock's start, where the clock being replaced ends at that same moment
+rather than at now. Org rounds clock-*in* down and clock-*out* to nearest; that
+asymmetry is inherited deliberately. A clock whose end would precede its start
+is left open and reported rather than recorded.
+
+Clocking out a clock that is not the active one goes through =org-with-clock=,
+which redirects the marker but not the rest: =org-clock-out= would still tear down
+the display, the timers and the remembered task of whichever clock is actually
+running. Losing the remembered task is not cosmetic — Org then stops recognising
+a clock-in on the running task as the same clock and splits its clock line — so
+those are held across the call.
 
 One place departs from Org's clock vocabulary. =org-is-active-clock= compares
 marker positions alone, which Org can afford because it never holds two clocks
@@ -107,6 +142,12 @@ at once. With parallel clocks in different files, two markers at the same
 character offset compare equal, and a clock-out then lands in the wrong file.
 =org-clock-projects--active-clock-p= compares the buffer as well, and
 =org-clock-projects--clock-out= is =org-clock-clock-out= with that substitution.
+
+One Org behaviour is inherited rather than worked around: =org-clock-in= stops the
+running clock before it writes the new clock line, so a clock-in that then fails
+— on a read-only buffer, say — leaves nothing running. Stock Org does the same.
+The session state this package keeps is rolled back in that case; the clock-out
+Org already wrote is not.
 
 * Tests
 
