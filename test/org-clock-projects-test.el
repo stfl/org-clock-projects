@@ -558,7 +558,7 @@ alist of (NAME . TEXT); intermediate directories are created."
     (should (= (length (org-clock-projects-test-open-lines "alpha.org")) 0))
     (should (= (length (org-clock-projects-test-open-lines "beta.org")) 1))
     (should (equal (org-clock-projects-test-current) "beta"))
-    (should (equal org-clock-projects-mode-line-string "⏱ beta"))))
+    (should (equal org-clock-projects-mode-line-string " ⏱ beta "))))
 
 (ert-deftest org-clock-projects-test-boundary-stop-yes-create-no ()
   (org-clock-projects-test-with-boundary '(t nil)
@@ -576,7 +576,7 @@ alist of (NAME . TEXT); intermediate directories are created."
     (should (= (length (org-clock-projects-test-open-lines "beta.org")) 1))
     (should (equal (org-clock-projects-test-active-file) "beta.org"))
     (should (equal (org-clock-projects-test-current) "beta"))
-    (should (equal org-clock-projects-mode-line-string "⏱ beta [+1]"))))
+    (should (equal org-clock-projects-mode-line-string " ⏱ beta [+1] "))))
 
 (ert-deftest org-clock-projects-test-boundary-stop-no-create-no ()
   (org-clock-projects-test-with-boundary '(nil nil)
@@ -1180,13 +1180,13 @@ end back past its own start, which is how a bad duration actually arises."
         ("gamma.org" . ,(org-clock-projects-test-entry "G one")))
     (org-clock-projects-test-with-answers '()
       (org-clock-projects-test-fork "alpha.org" "A one")
-      (should (equal org-clock-projects-mode-line-string "⏱ alpha"))
+      (should (equal org-clock-projects-mode-line-string " ⏱ alpha "))
       (org-clock-projects-test-advance 30)
       (org-clock-projects-test-fork "beta.org" "B one")
-      (should (equal org-clock-projects-mode-line-string "⏱ beta [+1]"))
+      (should (equal org-clock-projects-mode-line-string " ⏱ beta [+1] "))
       (org-clock-projects-test-advance 30)
       (org-clock-projects-test-fork "gamma.org" "G one")
-      (should (equal org-clock-projects-mode-line-string "⏱ gamma [+2]")))))
+      (should (equal org-clock-projects-mode-line-string " ⏱ gamma [+2] ")))))
 
 (ert-deftest org-clock-projects-test-mode-line-survives-clocking-out ()
   "A project outlives its clocks."
@@ -1197,7 +1197,7 @@ end back past its own start, which is how a bad duration actually arises."
       (org-clock-projects-test-fork "alpha.org" "A one")
       (org-clock-projects-test-advance 60)
       (org-clock-out))
-    (should (equal org-clock-projects-mode-line-string "⏱ alpha"))
+    (should (equal org-clock-projects-mode-line-string " ⏱ alpha "))
     (should (equal (org-clock-projects-test-current) "alpha"))))
 
 
@@ -1306,7 +1306,7 @@ end back past its own start, which is how a bad duration actually arises."
       (org-clock-projects-test-fork "alpha.org" "A one")
       (org-clock-projects-test-advance 30)
       (org-clock-projects-test-fork "beta.org" "B one"))
-    (should (equal org-clock-projects-mode-line-string "⏱ beta [+1]"))))
+    (should (equal org-clock-projects-mode-line-string " ⏱ beta [+1] "))))
 
 
 ;;;; Clocks running in the background
@@ -1548,7 +1548,7 @@ previous clock runs, and every minute after that is billed to it."
       (should-error (org-clock-projects-switch) :type 'user-error))
     ;; Nothing moved: the project, the modeline and the running clock all stand.
     (should (equal (org-clock-projects-test-current) "beta"))
-    (should (equal org-clock-projects-mode-line-string "⏱ beta [+1]"))
+    (should (equal org-clock-projects-mode-line-string " ⏱ beta [+1] "))
     (should (equal (org-clock-projects-test-active-file) "beta.org"))
     ;; But point is on the line that needs repairing.
     (should (equal (file-name-nondirectory (buffer-file-name)) "alpha.org"))))
@@ -1697,7 +1697,7 @@ after."
       (org-clock-projects-test-fork "clienta/tasks.org" "A one")
       (org-clock-projects-test-advance 30)
       (org-clock-projects-test-fork "clientb/tasks.org" "B one"))
-    (should (equal org-clock-projects-mode-line-string "⏱ clientb/tasks [+1]"))
+    (should (equal org-clock-projects-mode-line-string " ⏱ clientb/tasks [+1] "))
     (org-clock-projects-test-with-choice "clienta/tasks"
       (org-clock-projects-switch)
       (should (equal (org-clock-projects-test-candidates)
@@ -1719,7 +1719,7 @@ after."
       (org-clock-projects-test-fork "a/client/tasks.org" "A one")
       (org-clock-projects-test-advance 30)
       (org-clock-projects-test-fork "b/client/tasks.org" "B one"))
-    (should (equal org-clock-projects-mode-line-string "⏱ b/client/tasks [+1]"))
+    (should (equal org-clock-projects-mode-line-string " ⏱ b/client/tasks [+1] "))
     (org-clock-projects-test-with-choice "a/client/tasks"
       (org-clock-projects-switch)
       (should (equal (org-clock-projects-test-candidates)

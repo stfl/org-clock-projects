@@ -475,7 +475,10 @@ changes rather than on every modeline redisplay."
                            (equal (org-clock-projects--entry-file entry)
                                   org-clock-projects--current))
                          (org-clock-projects-open-clocks))))
-            (format "⏱ %s%s"
+            ;; Padded on both sides: `global-mode-string' entries render
+            ;; flush against each other, and Org's own clock string carries
+            ;; no space of its own.
+            (format " ⏱ %s%s "
                     (org-clock-projects-name org-clock-projects--current)
                     (if (> others 0) (format " [+%d]" others) "")))))
   (force-mode-line-update t)

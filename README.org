@@ -51,7 +51,9 @@ each clock's heading, start time and running duration. A project holding more
 than one open clock names each by its heading, so the surplus can be picked out.
 
 The modeline gains =⏱ <project> [+n]=, where =n= counts the *other* open clocks and
-is shown only when non-zero. Org's own active-clock display is untouched.
+is shown only when non-zero. It is padded on both sides, since entries in
+=global-mode-string= render flush against each other and Org's own clock string
+carries no space of its own. Org's active-clock display is untouched.
 
 * Setup
 
