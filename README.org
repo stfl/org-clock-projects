@@ -57,6 +57,13 @@ carries no space of its own. Org's active-clock display is untouched.
 
 * Setup
 
+With =straight.el= or Doom:
+
+#+begin_src emacs-lisp
+(package! org-clock-projects
+  :recipe (:host github :repo "stfl/org-clock-projects"))
+#+end_src
+
 #+begin_src emacs-lisp
 (use-package org-clock-projects
   :after org
