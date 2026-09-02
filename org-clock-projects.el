@@ -1513,14 +1513,18 @@ exactly that length passes."
            entries))))
 
 (defun org-clock-projects--file-tagged-p (file tag)
-  "Return non-nil when TAG is written anywhere in FILE.
-The export finds a project's time by its tag, so a file of the project's
-own that never mentions the tag exports nothing and gives no reason why.
-A tag declared once at the top of the file and one written on each entry
-both count: either is a file the tag match can reach."
+  "Return non-nil when FILE declares TAG for every entry it holds.
+The export finds a project's time by inherited tag, so a file of the
+project's own that does not declare the tag exports nothing and gives no
+reason why.
+
+Only a file-level tag makes every entry inherit one, so a tag worn by
+individual headlines does not count.  Accepting one would call a file
+clean while every entry outside those subtrees stayed unreachable, which
+is the silent under-export this check exists to catch."
   (with-current-buffer (org-clock-projects--org-buffer file)
     (org-with-wide-buffer
-     (and (assoc tag (org-get-buffer-tags)) t))))
+     (and (member tag org-file-tags) t))))
 
 (defun org-clock-projects--missing-tag-findings (record)
   "Return a finding for each of RECORD's own files that does not carry its tag.

@@ -37,6 +37,32 @@
                      hline
                      ("Total" "6:45" "1:45" "8:30"))))))
 
+(ert-deftest org-clock-projects-clockmatrix-opens-every-step-at-midnight ()
+  "A step period begins at midnight whatever `org-extend-today-until' says.
+That variable moves the start of a day for capture and for the agenda.
+A matrix honouring it for day, week and year steps while month and
+quarter kept midnight would disagree with itself about which period a
+clock belongs to, and with the CSV cut from the same range.  An hour
+before dawn is where the disagreement shows: this clock belongs to the
+day it was worked, not to the one before it."
+  (org-clock-projects-clockmatrix-test-with-data
+      '((:tag "alpha" :file "alpha.org"))
+      '(("alpha.org" . "\
+* TODO Before dawn :alpha:
+:LOGBOOK:
+CLOCK: [2026-05-02 Sat 01:00]--[2026-05-02 Sat 02:00] =>  1:00
+:END:
+"))
+    (let ((org-extend-today-until 3))
+      (should (equal (org-clock-projects-clockmatrix-test-table
+                      ":tstart \"2026-05-01\" :tend \"2026-05-03\" :step day")
+                     '(("Day" "alpha" "Total")
+                       hline
+                       ("2026-05-01" "" "")
+                       ("2026-05-02" "1:00" "1:00")
+                       hline
+                       ("Total" "1:00" "1:00")))))))
+
 (ert-deftest org-clock-projects-clockmatrix-keeps-a-project-in-historical-ranges ()
   "A project with no recent time still appears in a range that covers it."
   (org-clock-projects-clockmatrix-test-with-data

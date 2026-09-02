@@ -429,6 +429,32 @@ once, which is where a check judging by time alone would report them."
                "corner-cafe.org_archive"
                (org-clock-projects-check-test-says "missing-tag"))))))
 
+(ert-deftest org-clock-projects-check-test-a-headline-tag-does-not-tag-the-file ()
+  "A tag worn by one headline leaves the entries beside it unreachable.
+The export selects on inherited tags, so an archive whose tag sits on a
+headline rather than at the top of the file yields that subtree and
+silently drops the rest.  Calling such a file tagged would let the check
+pass on exactly the arrangement it exists to catch."
+  (let ((clock (org-clock-projects-check-test-hours 8 4 9 3)))
+    (org-clock-projects-check-test-with-projects
+        (list org-clock-projects-check-test-cafe)
+        `(("corner-cafe.org"
+           . ,(org-clock-projects-check-test-tagged
+               "cafe"
+               (org-clock-projects-test-closed-entry
+                "Design"
+                (org-clock-projects-check-test-hours 8 3 9 3))))
+          (,org-clock-projects-check-test-archive
+           . ,(concat "* Archived design :cafe:\n:LOGBOOK:\n"
+                      (org-clock-projects-test-clock-line (car clock) (cdr clock))
+                      ":END:\n* Unreachable\n")))
+      (org-clock-projects-test-with-prompts '("Corner Café" "2024-08")
+        (org-clock-projects-check)
+        (should (equal (org-clock-projects-check-test-kinds) '("missing-tag")))
+        (should (string-match-p
+                 "corner-cafe.org_archive"
+                 (org-clock-projects-check-test-says "missing-tag")))))))
+
 (ert-deftest org-clock-projects-check-test-a-tagged-archive-is-clean ()
   "The archive is scanned, so a tagged one has to come back with nothing.
 Paired with the untagged archive above, this is what shows the archive
