@@ -1,7 +1,7 @@
 ;; -*- mode: eask; lexical-binding: t; -*-
 
 (package "org-clock-projects"
-         "0.1.0"
+         "0.2.0"
          "Per-project parallel Org clocks")
 
 (website-url "https://github.com/stfl/org-clock-projects")
@@ -15,5 +15,6 @@
 
 (depends-on "emacs" "28.1")
 (depends-on "org" "9.6")
+(depends-on "org-clock-csv")
 
-(script "test" "eask test ert test/org-clock-projects-test.el")
+(script "test" "eask test ert test/*.el")

@@ -1,6 +1,7 @@
 #+title: org-clock-projects
 
-Per-project parallel Org clocks, with a switcher for the ones that are running.
+Per-project parallel Org clocks, with a switcher for the ones that are running,
+a period-scoped CSV export for invoicing off them, and a clock matrix.
 
 Org tracks exactly one clock. Work spanning several concurrent engagements does
 not fit that: switching from one to another means clocking out of the first,
@@ -23,22 +24,60 @@ backdates the new clock to the first one's clock-out.
 Clock lines are written by Org's own primitives and are indistinguishable from
 ordinary ones, so clocktables, reports and CSV export need no changes.
 
+The same list of projects drives the reporting half: a CSV export scoped to a
+billing period, a check that says what would make such an export
+untrustworthy, and a matrix of clocked time with periods down the rows and
+projects across the columns. All of them resolve a period through one core, so
+a matrix cell and a CSV describe the same stretch of time.
+
 * Dormant until used
 
 A project exists only after it is created — by the fork command, or by
 answering yes at the boundary prompt. Visiting or clocking in a file never
-enrols it. While no project exists, every path defers to stock Org: no prompt,
-no constraint, and an empty modeline segment.
+enrols it. While no project exists, every clocking path defers to stock Org: no
+prompt, no constraint, and an empty modeline segment.
+
+The reporting commands are not gated on that. They read the registry, so they
+work in a fresh session that has clocked nothing.
+
+* Projects
+
+A project is three strings that need not agree: a =:tag= its entries carry, a
+=:name= it is called by, and a =:file= its time is kept in. The list comes from
+=org-clock-projects-projects-function=, one entry per project:
+
+#+begin_src emacs-lisp
+(setq org-clock-projects-projects-function
+      (lambda ()
+        '((:tag "glas" :name "Café Glas" :file "cafe-glas.org")
+          (:tag "acme" :name "Acme Ltd"))))
+#+end_src
+
+Each identifier then has exactly one job: the name reaches the prompts, the tag
+selects entries and heads a matrix column, the file base names the exported
+file, and the file itself bounds the scan.
+
+A bare file name is a valid entry too, so a registry that hands back plain
+paths is understood as it stands. The defaults fill in the rest: a missing
+=:name= falls back to the tag and then to the file's base name, and a missing
+=:file= to =<tag>.org=. Relative file names are expanded against
+=org-directory=.
+
+The default function reads =org-clock-projects-files=, a plain list of files,
+which is all the clocking half needs.
 
 * Commands
 
-| Command                          | What it does                                                          |
-|----------------------------------+-----------------------------------------------------------------------|
-| =org-clock-projects-fork=          | Clock in at point, leaving the current project's clock running         |
-| =org-clock-projects-switch=        | Make one of the open clocks active and jump to it                      |
-| =org-clock-projects-clock-out-all= | Clock out of every open clock                                          |
-| =org-clock-projects-clear=         | Forget a project's session state; =C-u= for every project                |
-| =org-clock-projects-kill-emacs-query= | Ask about each open clock on exit; installed by the mode            |
+| Command                               | What it does                                                   |
+|---------------------------------------+----------------------------------------------------------------|
+| =org-clock-projects-fork=             | Clock in at point, leaving the current project's clock running |
+| =org-clock-projects-switch=           | Make one of the open clocks active and jump to it              |
+| =org-clock-projects-clock-out-all=    | Clock out of every open clock                                  |
+| =org-clock-projects-clear=            | Forget a project's session state; =C-u= for every project      |
+| =org-clock-projects-kill-emacs-query= | Ask about each open clock on exit; installed by the mode       |
+| =org-clock-projects-export=           | Write a project's clock entries for a period to CSV            |
+| =org-clock-projects-check=            | Report what is questionable about a project's clock data       |
+| =org-clock-projects-clockmatrix=      | Insert a =clockmatrix= dynamic block at point and render it    |
 
 Prompts that offer to close a clock name it, and say when it started and how
 long it has run, so a clock opened five minutes ago and one left open since
@@ -54,6 +93,315 @@ The modeline gains =⏱ <project> [+n]=, where =n= counts the *other* open clock
 is shown only when non-zero. It is padded on both sides, since entries in
 =global-mode-string= render flush against each other and Org's own clock string
 carries no space of its own. Org's active-clock display is untouched.
+
+* Exporting to CSV
+
+=org-clock-projects-export= writes one project's clock entries for a chosen
+period to a CSV file. It asks for the project, by its registered name, and then
+for the period.
+
+** Choosing a period
+
+The period prompt offers =lastmonth= — the default, because invoicing happens
+after the month it is for — along with =thismonth=, =lastq=, =thisq=,
+=lastweek=, =thisweek=, =lastyear=, =thisyear= and =range=. Anything else may be
+typed: =2026-08=, =2026-Q3=, =2026=, =2026-W35=, or any other keyword Org's own
+range resolution accepts, the [[*Rolling clock ranges][rolling ones]] this package adds included.
+
+=range= asks the date picker twice, for a start and an end that are both
+inclusive. Both picks are truncated to midnight and the end is carried forward
+a day, so a range picked as the 1st to the 31st bills the 31st whole and does
+not lose the morning of the 1st. Org's own interactive block takes the picker's
+answer as it comes, and the picker answers with the picked day at the current
+wall-clock time.
+
+A single day is refused, naming the forms that are accepted: a bare date is far
+more likely a slip for a month than a deliberate one-day invoice, and refusing
+the kind refuses =today= and =yesterday= along with it. So is a period with no
+beginning, which is what =untilnow= resolves to.
+
+Every boundary sits at midnight, and =org-extend-today-until= does not move one.
+A billing period is a run of calendar days, and an edge three hours off
+midnight under a file still named for a calendar month is a disagreement
+nothing downstream can see.
+
+** What lands in the file
+
+The file is =<period>-org-clock-<file-base>.csv=, written into
+=org-clock-projects-export-directory=, which is created if it does not exist.
+For a project whose file is =cafe-glas.org=:
+
+| Period          | File                                             |
+|-----------------+--------------------------------------------------|
+| =2026-08=       | =2026-08-org-clock-cafe-glas.csv=                |
+| =2026-Q3=       | =2026-Q3-org-clock-cafe-glas.csv=                |
+| =2026=          | =2026-org-clock-cafe-glas.csv=                   |
+| =2026-W35=      | =2026-W35-org-clock-cafe-glas.csv=               |
+| 2nd to 16th May | =2026-05-02--2026-05-16-org-clock-cafe-glas.csv= |
+
+The tail is not decoration: a downstream invoice build derives the same name
+from its own period, and a month's export has to match it exactly for the two
+to meet. A week takes the ISO week-year rather than the calendar year of the
+day it opens on, because the first ISO week of a year can begin in the year
+before it. A range is named by the last day it covers, not by its exclusive
+bound. =org-clock-projects-export-file-function= names the file if you want
+another convention; it is handed the project's record and the period, whose
+*kind* is what tells a quarter from an arbitrary range falling on the same two
+days.
+
+Entries are selected by *overlap* with the period, strictly at both ends. An
+entry ending exactly where the period begins belongs to the period before it
+alone, one starting exactly there to the period after it alone, and a
+zero-length entry sitting on the boundary to neither.
+
+Selected entries are written *whole*. The export never clips. The CSV is a
+transcript of the =CLOCK:= lines, which is what lets an invoice be checked
+against the Org file line by line; the price is that an entry straddling a
+period's edge appears in both adjacent exports, and trimming it to a billing
+period belongs downstream with whoever renders that invoice.
+
+Rows are sorted oldest first, so the file is reviewable by eye and a diff
+against last month's export means something. The header and each row come from
+=org-clock-csv-header= and =org-clock-csv-row-fmt=, so columns you have already
+arranged stay arranged. A period with nothing in it still writes its header and
+reports zero rows: downstream tooling looks the file up by name, and a quiet
+month should read as zero rows rather than as a broken build.
+
+** Scope and the prefix argument
+
+Entries are picked out by the project's tag, matched *with inheritance*, so a
+=#+FILETAGS:= line at the top of a project file reaches every clock beneath it.
+A project with no tag takes every entry the period holds in its files.
+
+The prefix argument both widens the scan and waives the checks:
+
+| Gesture       | Scan                    | Checks  |
+|---------------+-------------------------+---------|
+| none          | the project's own files | both    |
+| =C-u=         | every agenda file       | both    |
+| =C-u C-u=     | the project's own files | neither |
+| =C-u C-u C-u= | every agenda file       | neither |
+
+The default scan is the project's file together with the archives Org resolves
+for it, from =org-archive-location= and from any =:ARCHIVE:= property a subtree
+sets. Archives that do not exist are dropped, so a project that has never been
+archived is not a special case. That narrow scope is also what makes the export
+agree with the matrix by construction, and what keeps it to about a second.
+
+Widening reaches every agenda file and its archives, with the tag as the only
+selector. That is the way to find work carrying the project's tag but filed
+somewhere else, and it is an audit path rather than the everyday one.
+
+Waiving the checks is unsafe by construction, so it is deliberately the harder
+gesture, and it waives both rather than one: reproducing an invoice already
+issued over data known to be bad is the reason to have the override at all.
+
+** What the export refuses on
+
+Before writing anything, the export stops on either of two findings.
+
+An *open clock* whose start precedes the period's end. This one cannot be left
+to anything downstream: =org-clock-csv= takes closed clocks and says nothing
+about the rest, so an open clock's time goes missing from the invoice with no
+trace of it in the output, and it cannot be clipped either, having no end.
+Exporting the current period while legitimately clocked on that project
+therefore fails, and that is correct.
+
+An *overlap* between two of the selected entries. Two projects clocked at once
+is what parallel clocks are for and is never reported; two entries of one
+project covering the same minutes bill them twice.
+
+Nothing has been written by the time either is raised.
+
+* Checking clock data
+
+=org-clock-projects-check= asks the same two questions, takes the same prefix
+argument for widening, and writes nothing. It renders every finding into
+=*org-clock-projects-check*=, one line each, each line a button that takes you
+to the clock line it is about. A run that turns nothing up says so rather than
+showing an empty buffer.
+
+It reports four things:
+
+| Kind          | What it means                                                        |
+|---------------+----------------------------------------------------------------------|
+| =open-clock=  | A clock still running when the period ended                          |
+| =overlap=     | Two selected entries covering the same minutes                       |
+| =long-entry=  | An entry longer than =org-clock-projects-duration-threshold= hours   |
+| =missing-tag= | One of the project's own files that never mentions the project's tag |
+
+The duration threshold is the mis-entry guard, and defaults to 10 hours. A
+boundary check catches a forgotten clock-out only when it happens to straddle a
+period edge; a stretch no working day reaches is visible wherever in the period
+it falls.
+
+=missing-tag= is always asked of the project's own file and its existing
+archives, whatever the scan scope. Widening is how work filed elsewhere is
+found, so the agenda files it reaches are not expected to carry the tag, and
+asking the question of them would bury the one file that should under every
+file that never claimed to.
+
+This is the command to reach for once an export has stopped, and the one to run
+before invoicing so that everything questionable arrives at once rather than
+one error at a time.
+
+* Rolling clock ranges
+
+The package installs a family of Org range keywords for =:block=, usable
+anywhere Org accepts a =:block= value: a plain =clocktable=, a stepped
+=clocktable=, or =clockmatrix=. They extend Org's clock reporting rather than
+this package's clocking, so they install when the file loads and work whether
+or not =org-clock-projects-mode= is on.
+
+The family covers six units, matching =:step= exactly:
+
+- =lastdays-N=
+- =lastweeks-N=
+- =lastsemimonths-N=
+- =lastmonths-N=
+- =lastquarters-N=
+- =lastyears-N=
+
+Each selects the last =N= whole periods of that unit, ending with and
+including the period currently in progress. =lastweeks-1= is the current week
+alone, equal to =thisweek=. =lastweeks-8= is the current week plus the seven
+before it.
+
+Because the window is measured in the same unit as its boundaries, every
+period in it is whole. This is the point of the family: =:block thismonth
+:step week= splits the week that rolls over the month end across two
+reports, and neither figure answers "how much did I work that week?" =:block
+lastweeks-8 :step week= never does that.
+
+#+begin_example
+ #+BEGIN: clocktable :block lastweeks-8 :step week
+ #+END:
+
+ #+BEGIN: clockmatrix :block lastmonths-12 :step month
+ #+END:
+#+end_example
+
+*Singular vs. plural:* the plural is the whole distinction. Org's singular
+=lastweek= means the previous week — a shift, excluding the current one.
+=lastweeks-1= means the last one week — a span, including the current one.
+They differ by one character and by a week. The same distinction holds
+between =lastmonth= and =lastmonths-1=.
+
+=N= must be a positive whole number; anything else is reported as an error.
+An unrecognised unit produces Org's own =No such time block= error, exactly
+as a typo always has.
+
+=:step= is never inferred from the keyword — write the =:step= you want. A
+finer step that divides the window cleanly is legitimate and useful: =:block
+lastweeks-8 :step day= is a sound 56-row daily view.
+
+Week boundaries follow =:wstart= and month boundaries follow =:mstart=, the
+same as every other clock report. Semimonths are the exception: they always
+split on the 1st and the 16th, exactly as =:step semimonth= does, so
+=:mstart= does not move them.
+
+=:block= keeps its existing precedence over =:tstart=/=:tend=; these
+keywords introduce no new precedence rule.
+
+=S-<left>= / =S-<right>= (Org's clocktable shift command) refuse to shift a
+block using one of these keywords, reporting Org's own =Cannot shift
+clocktable block= message — the same refusal =untilnow= gets. Org's shift
+command would otherwise misread the digits of =lastweeks-8= as a bare year
+and silently rewrite the block, destroying the parameter.
+
+* Clockmatrix
+
+=clockmatrix= is an Org dynamic block that renders clocked time as a matrix:
+calendar periods down the rows, projects across the columns, with totals on
+both axes. Columns default to the projects
+=org-clock-projects-projects-function= returns, so the common case needs no
+configuration beyond a range.
+
+#+begin_example
+ #+BEGIN: clockmatrix :block thisyear :step month
+ | Month   | alpha | beta   | gamma |  Total |
+ |---------+-------+--------+-------+--------|
+ | 2026-05 | 57:00 |  49:45 |  1:45 | 108:30 |
+ | 2026-06 | 13:00 |  79:00 |       |  92:00 |
+ |---------+-------+--------+-------+--------|
+ | Total   | 70:00 | 128:45 |  1:45 | 200:30 |
+ #+END:
+#+end_example
+
+Refresh it with =C-c C-c= like any dynamic block. It is also registered with
+Org's dynamic-block registry, so it appears under =C-c C-x x=. Like the range
+keywords, it installs when the file loads and does not wait for
+=org-clock-projects-mode=.
+
+** Parameters
+
+| Param                 | Default              | Meaning                                                              |
+|-----------------------+----------------------+----------------------------------------------------------------------|
+| =:block=              | —                    | Range keyword, as clocktable (=thisyear=, =2026-Q2=, ...) or [[*Rolling clock ranges][rolling]] |
+| =:tstart= / =:tend=   | —                    | Explicit range; =:block= takes precedence                            |
+| =:step=               | =month=              | =day= / =week= / =semimonth= / =month= / =quarter= / =year=          |
+| =:tags=               | the registry's order | Column tags, replacing the registered projects                       |
+| =:scope=              | project files        | or =agenda-with-archives=                                            |
+| =:stepskip0=          | =nil=                | Drop all-zero rows                                                   |
+| =:total=              | =t=                  | Total column and Total row                                           |
+| =:wstart= / =:mstart= | 1 / 1                | Week (0-6, Sunday is 0) / month (1-31) start day, as clocktable      |
+
+A range is required: set =:block=, or both =:tstart= and =:tend=. This
+mirrors clocktable, which likewise requires a range whenever =:step= is used.
+
+** Behaviour
+
+- A column is headed by its project's tag, so a header can be pasted straight
+  into a clocktable =:match= when reconciling. A registered project with no
+  tag is headed by its file's base name instead, and takes that file whole.
+- =:tags= names the columns outright. Each tag is resolved against the
+  registry first, so a project registered under a file name of its own is
+  still read from that file; a tag registered nowhere falls back to
+  =<tag>.org=.
+- A project with zero clocked time across the whole range is dropped as a
+  column. A cell with zero time is left blank rather than showing =0:00=.
+  Every period in the range gets a row, including one with no clocked time
+  at all; =:stepskip0 t= drops those all-zero rows. The default, =nil=,
+  matches =org-clocktable-defaults=, so a parameter shared with clocktable
+  does not disagree on its default between the two. This is what keeps a
+  week you did not work visible as a gap in =:block lastweeks-8= output,
+  rather than silently omitting it.
+- Total means the sum of the project columns shown, never all clocked time:
+  time that does not carry a registered project tag is not represented, and
+  there is no residual "Other" column.
+- Row labels: =%Y-%m= for month; =%Y-%m-%d= for day, week, and semimonth,
+  with a week labelled by its start date; =%Y-QN= for quarter; =%Y= for
+  year.
+- A clock spanning a period boundary is split between the two periods, so
+  rows partition the range exactly. The [[*Exporting to CSV][CSV export]] instead writes such an
+  entry whole into both adjacent periods, so a matrix cell and an export for
+  the same range differ by exactly the clipped share. Both are right for what
+  they are: the matrix is a report and stays comparable with the clocktable
+  you would write beside it, while the CSV is the evidence behind an invoice,
+  whose clipping belongs to whoever renders that invoice.
+- Every period begins at midnight, whatever the step, and =:block= resolves
+  through the same period core the CSV export uses, so the two reports are
+  cut on the same boundaries. =org-extend-today-until= does not move a period
+  edge here; a billing period is a run of calendar days.
+- Weeks start on the day given by =:wstart=, which defaults to =1= (Monday),
+  inherited from =org-clocktable-defaults=. Org's clock code never consults
+  =calendar-week-start-day= — that variable governs only how the calendar is
+  drawn, so setting it has no effect here. To start weeks on Sunday, write
+  =:wstart 0= on the block.
+- Durations honour =org-duration-format=, except that units above hours are
+  dropped, so a monthly total reads =108:30= rather than =4d 12:30=.
+- The default scope reads each project's own file plus the archives Org
+  resolves for it, from =org-archive-location= and from any =:ARCHIVE:=
+  property the file sets. Asking Org is what keeps the report reading the
+  files the archive command actually writes to. That narrow scope is also
+  what keeps refresh interactive: a cell is one clock-sum over a (period,
+  project) pair, so the work is periods × projects × files, and file scope
+  dominates it. =:scope agenda-with-archives= widens to every agenda file and
+  its archives, as an audit path.
+- A project whose main file is missing produces a warning naming the project
+  and the path tried; fix it by setting =:file= on its entry in the registry,
+  or by using =:scope agenda-with-archives=. A missing archive file is
+  silent, because most projects never accumulate one.
 
 * Setup
 
@@ -72,17 +420,26 @@ With =straight.el= or Doom:
   (org-clock-projects-mode 1))
 #+end_src
 
-Names in =org-clock-projects-files= are expanded against =org-directory=. To drive
-the list from a project registry you already keep, set
-=org-clock-projects-files-function= to a function returning it — the package has
-no dependency on any particular registry:
+Names in =org-clock-projects-files= are expanded against =org-directory=. To
+drive the list from a project registry you already keep, set
+=org-clock-projects-projects-function= to a function returning it — the package
+has no dependency on any particular registry, and reads either [[*Projects][records]] or bare
+file names:
 
 #+begin_src emacs-lisp
-(setq org-clock-projects-files-function #'my-project-files)
+(setq org-clock-projects-projects-function #'my-project-records)
 #+end_src
 
-=org-clock-projects-continue-threshold= (30 minutes) is the gap below which a
-project's clock-out time is resumed silently; above it you are asked.
+** Settings
+
+| Setting                                   | Default                                        | Meaning                                                            |
+|-------------------------------------------+------------------------------------------------+--------------------------------------------------------------------|
+| =org-clock-projects-files=                | =nil=                                          | Org files that may become clock projects                           |
+| =org-clock-projects-projects-function=    | reads the above                                | Where the projects come from                                       |
+| =org-clock-projects-continue-threshold=   | =30=                                           | Minutes below which a project's clock-out time is resumed silently |
+| =org-clock-projects-export-directory=     | ="~/"=                                         | Where exported CSV files are written                               |
+| =org-clock-projects-export-file-function= | the =<period>-org-clock-<file-base>.csv= namer | Names one export's file                                            |
+| =org-clock-projects-duration-threshold=   | =10=                                           | Hours above which one entry is reported as questionable            |
 
 ** Required Org setting
 
@@ -185,16 +542,32 @@ running clock before it writes the new clock line, so a clock-in that then fails
 The session state this package keeps is rolled back in that case; the clock-out
 Org already wrote is not.
 
+The export gates on the period *before* it parses anything. A clock element
+carries its start and its end as separate fields already, and zero-padded they
+sort chronologically, so membership is two string comparisons on data the parse
+produced anyway. Only survivors are handed to =org-clock-csv=, which is where the
+cost is: it builds each entry's whole inherited-property plist. Measured on a
+real project, 9.61s becomes 0.44s. Gating on the tag first would decide nothing,
+because a project's tag sits at the top of its file and every clock in the file
+inherits it.
+
+=org-clock-csv= is unmaintained — last commit December 2020, no active fork —
+and offers no filtering interface of any kind; its only knobs are the header
+string and the row formatter. The export therefore reads two of its private
+functions directly, the per-element parser and the file-keyword reader. That is
+a deliberate and recorded decision rather than an oversight, and both call sites
+say so.
+
 * Tests
 
 #+begin_src sh
-emacs -Q --batch -L . -l ert -l test/org-clock-projects-test.el \
-      --eval "(ert-run-tests-batch-and-exit t)"
+eask install-deps && eask test ert test/*.el
 #+end_src
 
 Tests assert only externally observable state: the text of the clock lines in
 the fixture files, which clock Org considers active, the current project, the
-modeline string, and which questions a flow asked.
+modeline string, the CSV that lands on disk, the rendered matrix, and which
+questions a flow asked.
 
 Where this package mirrors an Org internal, the test asks Org rather than
 pinning down the answer. The set of clock timestamps Org resumes in place is
@@ -205,3 +578,10 @@ pattern. Several flows ask two or
 three questions in sequence, so the harness takes a queue of scripted answers
 and fails on a question the queue did not anticipate — how many questions a
 flow asks, and in what order, is a tested property rather than an accident.
+
+Every file under =test/= that names tests is loaded by path, which is what makes
+the harness files separate: loading a file twice redefines the tests in it, and
+ERT refuses that, so no file that defines a test may be required by another. The
+shared fixtures — the frozen clock, the scripted answer queues, the sandbox, and
+the clockmatrix sandbox alongside them — live in =*-harness.el= files, which
+carry no tests and can be loaded as often as the runner likes.

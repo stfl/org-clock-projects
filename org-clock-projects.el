@@ -3,8 +3,8 @@
 ;; Copyright (C) 2026 Stefan Lendl
 
 ;; Author: Stefan Lendl <s@stfl.dev>
-;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (org "9.6"))
+;; Version: 0.2.0
+;; Package-Requires: ((emacs "28.1") (org "9.6") (org-clock-csv "1.2"))
 ;; Keywords: calendar, convenience
 ;; URL: https://github.com/stfl/org-clock-projects
 
@@ -43,10 +43,25 @@
 ;; session, every code path behaves exactly like stock Org clocking, and nothing
 ;; prompts, constrains, or displays.
 ;;
-;; The set of files that may become projects comes from
-;; `org-clock-projects-files-function', which defaults to returning
-;; `org-clock-projects-files'.  Point it at your own project registry to avoid
-;; maintaining the same list twice.
+;; The projects come from `org-clock-projects-projects-function', which
+;; defaults to reading `org-clock-projects-files'.  A project is a tag its
+;; entries carry, a name it is called by and a file its time is kept in, and
+;; the three need not agree; a bare file name is a project too.  Point the
+;; function at your own registry to avoid maintaining the same list twice.
+;;
+;; That registry also feeds the reporting half of the package.
+;; `org-clock-projects-export' writes one project's clock entries for a chosen
+;; period — a month, a quarter, a year, an ISO week, or an arbitrary range —
+;; to CSV, whole and in the order the work happened, so an invoice can be
+;; checked against the Org file line by line.  `org-clock-projects-check'
+;; reports what would make such an export untrustworthy: a clock still
+;; running, two entries of one project covering the same minutes, an
+;; implausibly long entry, and a project file that never mentions its own tag.
+;; The `clockmatrix' dynamic block renders clocked time as calendar periods
+;; against projects, and a family of `last<unit>s-N' keywords extends Org's
+;; `:block' vocabulary with windows measured in whole periods.  Every one of
+;; them resolves its period through one core, so a matrix cell and a CSV
+;; describe the same stretch of time.
 ;;
 ;; This package is built on Org's own clock vocabulary rather than a parallel
 ;; implementation.  A clock is the cons of a marker and a start time — the shape
@@ -62,11 +77,21 @@
 
 ;;; Code:
 
+(require 'calendar)
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
 (require 'org)
+(require 'org-agenda)
+(require 'org-archive)
 (require 'org-clock)
+(require 'org-duration)
+(require 'org-element)
+(require 'org-table)
+;; The CSV package is unmaintained and offers no filtering interface of any
+;; kind, so the export reads two of its internals directly.  Both are named
+;; where they are called, with the reasoning beside them.
+(require 'org-clock-csv)
 
 (defgroup org-clock-projects nil
   "Per-project parallel Org clocks."
@@ -78,16 +103,9 @@
 
 (defcustom org-clock-projects-files nil
   "Org files that may become clock projects.
-Relative names are expanded against `org-directory'.  This is what the
-default `org-clock-projects-files-function' returns."
+Relative names are expanded against `org-directory'.  This is the list
+the default `org-clock-projects-projects-function' turns into records."
   :type '(repeat file))
-
-(defcustom org-clock-projects-files-function #'org-clock-projects-default-files
-  "Function returning the files that may become clock projects.
-It takes no arguments and returns a list of file names, absolute or
-relative to `org-directory'.  Set it to your own project registry's
-accessor to keep one list rather than two."
-  :type 'function)
 
 (defcustom org-clock-projects-continue-threshold 30
   "Minutes below which a project's clock-out time is resumed without asking.
@@ -95,9 +113,72 @@ Above it, clocking in on a project asks whether to start from that
 project's stored clock-out time."
   :type 'integer)
 
-(defun org-clock-projects-default-files ()
-  "Return `org-clock-projects-files'."
-  org-clock-projects-files)
+
+;;;; Project records
+;;
+;; A project is three strings that need not agree: a tag its entries carry, a
+;; name it is called by, and a file its time is kept in.  Every consumer here
+;; wants a different one of them, so the registry is normalised once into a
+;; record and no consumer applies a default of its own.
+
+(defun org-clock-projects--record (entry)
+  "Return ENTRY as a project record.
+A record is a plist of `:tag', `:name' and `:file'.  ENTRY is either a
+record already or a bare file name, and both shapes are answered for: a
+registry that hands back plain file names keeps working, and one that has
+learned to hand back records is understood the moment it does.
+
+A bare file name is a record with no tag, called after the file.  A
+record without a name is called by its tag, and one without a file keeps
+its time in `<tag>.org'."
+  (if (stringp entry)
+      (list :tag nil :name (file-name-base entry) :file entry)
+    (let* ((tag (plist-get entry :tag))
+           (file (or (plist-get entry :file)
+                     (and tag (format "%s.org" tag)))))
+      (list :tag tag
+            :name (or (plist-get entry :name)
+                      tag
+                      (and file (file-name-base file)))
+            :file file))))
+
+(defsubst org-clock-projects--record-tag (record)
+  "Return the tag RECORD's entries carry, or nil when it has none."
+  (plist-get record :tag))
+
+(defsubst org-clock-projects--record-name (record)
+  "Return the name RECORD is displayed under."
+  (plist-get record :name))
+
+(defsubst org-clock-projects--record-file (record)
+  "Return the Org file RECORD keeps its time in."
+  (plist-get record :file))
+
+;; Declared ahead of the option it names, so that a setting made under the old
+;; name is the setting the option starts life with.
+(define-obsolete-variable-alias 'org-clock-projects-files-function
+  'org-clock-projects-projects-function "0.2.0")
+
+(defcustom org-clock-projects-projects-function
+  #'org-clock-projects-default-projects
+  "Function returning the projects this package knows about.
+It takes no arguments and returns a list of entries, each either a plist
+of `:tag', `:name' and `:file' or a bare file name.  Relative file names
+are expanded against `org-directory'.  Point it at your own project
+registry's accessor to keep one list rather than two."
+  :type 'function)
+
+(defun org-clock-projects-default-projects ()
+  "Return `org-clock-projects-files' as records."
+  (mapcar #'org-clock-projects--record org-clock-projects-files))
+
+(define-obsolete-function-alias 'org-clock-projects-default-files
+  #'org-clock-projects-default-projects "0.2.0")
+
+(defun org-clock-projects--records ()
+  "Return every registered project as a normalised record."
+  (mapcar #'org-clock-projects--record
+          (funcall org-clock-projects-projects-function)))
 
 
 ;;;; Session state
@@ -142,8 +223,27 @@ While no project exists, every path in this package defers to stock Org."
 (defun org-clock-projects--candidate-files ()
   "Return the truenames of every file that may become a project."
   (delete-dups
-   (delq nil (mapcar #'org-clock-projects--truename
-                     (funcall org-clock-projects-files-function)))))
+   (delq nil (mapcar (lambda (record)
+                       (org-clock-projects--truename
+                        (org-clock-projects--record-file record)))
+                     (org-clock-projects--records)))))
+
+(defun org-clock-projects--org-buffer (file)
+  "Return a buffer visiting FILE in `org-mode'.
+Org names an archive for itself — `<file>.org_archive' by default — and
+no `auto-mode-alist' entry claims that name, so a buffer visiting one
+arrives in Fundamental mode, where reading a tag raises an error and
+reading an inherited property answers nil.  The file is an Org file by
+construction, so the mode is put on it.
+
+The mode is turned on in full rather than with the hooks held back: a
+finding jumps into this buffer, and a reader who lands in a half-prepared
+Org buffer to fix a clock line has been handed something stranger than a
+slow command."
+  (let ((buffer (find-file-noselect file)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'org-mode) (org-mode)))
+    buffer))
 
 (defun org-clock-projects--candidate-p (file)
   "Return non-nil when FILE may become a project."
@@ -898,6 +998,1135 @@ mode."
         (with-current-buffer buffer
           (when (buffer-file-name) (save-buffer)))))))
   t)
+
+
+;;;; Periods
+;;
+;; A period is a plist of `:kind', `:start' and `:end', bounded half-open at
+;; midnight.  Every boundary comes from `org-clock-special-range', so months,
+;; quarters, ISO weeks and years are Org's own rather than a second calendar
+;; arithmetic that drifts from it.  The exporter, the check and the clock
+;; matrix all resolve through here, which is what makes a cell and a CSV
+;; describe the same stretch of time.
+
+(defconst org-clock-projects--period-keys
+  '((lastmonth . month) (thismonth . month)
+    (lastq . quarter) (thisq . quarter)
+    (lastweek . week) (thisweek . week)
+    (lastyear . year) (thisyear . year)
+    (today . day) (yesterday . day))
+  "The kind of period each of Org's relative range keys names.
+The range resolver answers with bounds and a display string but with no
+kind of its own, and the display string is locale-dependent, so the kind
+has to be stated rather than read back.  Without this table the default
+selection would fail to classify and be named as though it were an
+arbitrary range.")
+
+(defconst org-clock-projects--period-forms
+  '(("\\`[0-9]+\\'" . year)
+    ("\\`[0-9]+-[0-9]\\{1,2\\}\\'" . month)
+    ("\\`[0-9]+-[wW][0-9]\\{1,2\\}\\'" . week)
+    ("\\`[0-9]+-[qQ][1-4]\\'" . quarter)
+    ("\\`[0-9]+-[0-9]\\{1,2\\}-[0-9]\\{1,2\\}\\'" . day))
+  "The kind of period each typed range form names.
+The patterns are the range resolver's own, so a form that resolves is a
+form that classifies and the two cannot drift apart.")
+
+(defconst org-clock-projects--period-candidates
+  '("lastmonth" "thismonth" "lastq" "thisq"
+    "lastweek" "thisweek" "lastyear" "thisyear" "range")
+  "The periods the prompt offers, previous month first.
+Anything else may still be typed; `range' asks for two dates instead.")
+
+(defconst org-clock-projects--period-forms-help
+  "a month, a quarter, a year, a week (YYYY-MM, YYYY-QN, YYYY, YYYY-Www) or a range"
+  "The periods an export accepts, worded as a refusal names them.")
+
+(defun org-clock-projects--period-kind (key)
+  "Return the kind of period KEY names, or `interval' when it names none.
+A key that resolves without classifying — the rolling `last<unit>s-N'
+keywords among them — is an interval, which is a period like any other
+and is named by its two dates rather than refused."
+  (or (alist-get key org-clock-projects--period-keys)
+      (let ((written (symbol-name key)))
+        (cdr (seq-find (lambda (form) (string-match-p (car form) written))
+                       org-clock-projects--period-forms)))
+      'interval))
+
+(defun org-clock-projects--period (spec &optional wstart mstart time)
+  "Return the period SPEC names, as a plist of `:kind', `:start' and `:end'.
+SPEC is a range key, as a symbol or a string, or a cons of the start and
+end times of an interval.  WSTART and MSTART are the week and month start
+days, and TIME the instant a relative key is read against, all with the
+meanings `org-clock-special-range' gives them.
+
+SPEC is interned before it is resolved.  The relative keys are dispatched
+on symbols, so `lastmonth' resolves where the string does not, while the
+typed forms reach a branch that writes the key back out as a string and
+so accept either.  Interning unconditionally is what makes the two behave
+alike.
+
+TIME is passed on explicitly rather than left to default.  The resolver
+decodes a nil time in C, reading the system clock directly, where a
+caller holding an instant of its own — the matrix stepping through a
+range, a test with the clock stopped — means that one.
+
+`org-extend-today-until' is held at zero throughout.  A billing period is
+a stretch of calendar days, and a boundary sitting three hours off
+midnight while the file is still named for a calendar month is a
+disagreement nothing downstream can see.
+
+Nothing is refused here.  `untilnow' resolves without a start and is
+passed on with it missing, because whether an open-ended period is usable
+is a question for whoever asked for one."
+  (if (consp spec)
+      (list :kind 'interval :start (car spec) :end (cdr spec))
+    (let* ((key (intern (format "%s" spec)))
+           (org-extend-today-until 0)
+           (range (org-clock-special-range key (or time (current-time))
+                                           nil wstart mstart)))
+      (list :kind (org-clock-projects--period-kind key)
+            :start (nth 0 range)
+            :end (nth 1 range)))))
+
+(defun org-clock-projects--midnight (time)
+  "Return the midnight beginning TIME's calendar day."
+  (pcase-let ((`(,_ ,_ ,_ ,d ,m ,y . ,_) (decode-time time)))
+    (org-encode-time 0 0 0 d m y)))
+
+(defun org-clock-projects--next-midnight (time)
+  "Return the midnight beginning the day after TIME's."
+  (pcase-let ((`(,_ ,_ ,_ ,d ,m ,y . ,_) (decode-time time)))
+    (org-encode-time 0 0 0 (1+ d) m y)))
+
+(defun org-clock-projects--previous-day (time)
+  "Return noon on the calendar day before TIME's.
+Noon rather than midnight so that a day an hour shorter for daylight
+saving cannot carry the result back into the day before that."
+  (pcase-let ((`(,_ ,_ ,_ ,d ,m ,y . ,_) (decode-time time)))
+    (org-encode-time 0 0 12 (1- d) m y)))
+
+(defun org-clock-projects--period-label (period)
+  "Return the name PERIOD goes by in a file name.
+A month, a quarter, a year and a week are named as they are written at
+the prompt; anything else is named by its two dates.  A week takes the
+ISO week-year rather than the calendar year of the day it opens on,
+because the first ISO week of a year can begin in the year before it and
+`2025-W01' names a week nobody has.
+
+The end date of an interval is the last day it covers rather than the
+exclusive bound, so a range picked as the 2nd to the 16th is named for
+the 2nd and the 16th."
+  (let ((start (plist-get period :start))
+        (end (plist-get period :end)))
+    (pcase (plist-get period :kind)
+      (`month (format-time-string "%Y-%m" start))
+      (`year (format-time-string "%Y" start))
+      (`week (format-time-string "%G-W%V" start))
+      (`quarter (pcase-let ((`(,_ ,_ ,_ ,_ ,m ,y . ,_) (decode-time start)))
+                  (format "%d-Q%d" y (1+ (/ (1- m) 3)))))
+      (_ (format "%s--%s"
+                 (format-time-string "%Y-%m-%d" start)
+                 (format-time-string
+                  "%Y-%m-%d" (org-clock-projects--previous-day end)))))))
+
+(defun org-clock-projects--read-range ()
+  "Prompt for two dates and return the period lying between them.
+Both picks are truncated to midnight and the end is carried forward a
+day, so the day picked as the end is billed whole.  Org's own interactive
+block takes the picker's answer as it comes; the picker answers with the
+picked day at the current wall-clock time, so a range taken that way
+begins after the morning of its first day and stops before the evening of
+its last."
+  (let ((start (org-read-date nil t nil "Range start (inclusive): "))
+        (end (org-read-date nil t nil "Range end (inclusive): ")))
+    (org-clock-projects--period
+     (cons (org-clock-projects--midnight start)
+           (org-clock-projects--next-midnight end)))))
+
+(defun org-clock-projects--read-period ()
+  "Prompt for a period and return its plist.
+The relative keys are offered for completion and anything else may be
+typed, which is why the prompt names the forms that are accepted: a
+completion list announces nothing about free text.
+
+Validation lives here rather than in the period core, which resolves
+whatever it is handed.  A single day is refused because a bare date is
+far more likely a slip for a month than a deliberate one-day invoice, and
+refusing the kind refuses `today' and `yesterday' along with it.  A
+period with no beginning — `untilnow' resolves to one — is refused
+because no membership decision can be made against it."
+  (let* ((answer (completing-read
+                  "Period (or YYYY-MM, YYYY-QN, YYYY, YYYY-Www): "
+                  org-clock-projects--period-candidates
+                  nil nil nil nil "lastmonth"))
+         (period (if (equal answer "range")
+                     (org-clock-projects--read-range)
+                   (org-clock-projects--period answer))))
+    (when (eq (plist-get period :kind) 'day)
+      (user-error "%s names a single day; export %s"
+                  answer org-clock-projects--period-forms-help))
+    (unless (plist-get period :start)
+      (user-error "%s has no beginning; export %s"
+                  answer org-clock-projects--period-forms-help))
+    period))
+
+
+;;;; Selecting entries
+;;
+;; Membership is decided on `YYYY-MM-DD HH:MM' strings rather than on time
+;; values.  A clock element carries its start and its end as separate fields
+;; already, and zero-padded they sort chronologically, so the question is two
+;; string comparisons on data the parse produced anyway.
+;;
+;; That is what makes the period the primary gate, ahead of any parsing.  Only
+;; the entries a period holds are handed to the CSV package's parser, which is
+;; where the cost is: it builds each entry's whole inherited-property plist.
+;; Gating on the tag first would decide nothing, because a project's tag sits
+;; at the top of its file and every clock in the file inherits it.
+
+(defun org-clock-projects--stamp (year month day hour minute)
+  "Return YEAR MONTH DAY HOUR MINUTE as a `YYYY-MM-DD HH:MM' string.
+Every field is padded to its full width, which is what lets two of these
+be compared with `string<'.  A timestamp carrying no time of day is read
+as midnight, the way Org reads one."
+  (format "%04d-%02d-%02d %02d:%02d" year month day (or hour 0) (or minute 0)))
+
+(defun org-clock-projects--time-stamp (time)
+  "Return TIME in the form `org-clock-projects--stamp' writes.
+A period's bounds and a clock's are written alike so that membership is
+settled by comparing them directly."
+  (format-time-string "%Y-%m-%d %H:%M" time))
+
+(defun org-clock-projects--clock-start (element)
+  "Return the stamp clock ELEMENT begins at."
+  (let ((timestamp (org-element-property :value element)))
+    (org-clock-projects--stamp
+     (org-element-property :year-start timestamp)
+     (org-element-property :month-start timestamp)
+     (org-element-property :day-start timestamp)
+     (org-element-property :hour-start timestamp)
+     (org-element-property :minute-start timestamp))))
+
+(defun org-clock-projects--clock-end (element)
+  "Return the stamp clock ELEMENT ends at.
+A clock still running has no end of its own, and Org reports its start
+again, which places it at a single instant and outside every period whose
+edge it sits on."
+  (let ((timestamp (org-element-property :value element)))
+    (org-clock-projects--stamp
+     (org-element-property :year-end timestamp)
+     (org-element-property :month-end timestamp)
+     (org-element-property :day-end timestamp)
+     (org-element-property :hour-end timestamp)
+     (org-element-property :minute-end timestamp))))
+
+(defun org-clock-projects--clock-closed-p (element)
+  "Return non-nil when clock ELEMENT records a finished stretch of time.
+This is exactly what `org-clock-csv' will take: a closed status and an
+inactive range.  The two are asked together because a clock line without
+its `=>  H:MM' tail parses as running however its timestamp reads, and
+such a line is dropped from the CSV without a word."
+  (and (eq (org-element-property :status element) 'closed)
+       (eq (org-element-property :type (org-element-property :value element))
+           'inactive-range)))
+
+(defun org-clock-projects--clock-task (element)
+  "Return the heading clock ELEMENT was clocked on, or nil above every heading."
+  (let ((headline (org-element-lineage element '(headline))))
+    (and headline (org-element-property :raw-value headline))))
+
+(defun org-clock-projects--in-period-p (start end from until)
+  "Return non-nil when a clock from START to END overlaps FROM until UNTIL.
+All four are stamps, and the comparison is strict at both ends: an entry
+ending exactly where a period begins belongs to the period before it
+alone, one starting exactly there to the period after it alone, and an
+entry of no length sitting on the boundary to neither."
+  (and (string< start until)
+       (string< from end)))
+
+(defun org-clock-projects--matches-p (element matcher)
+  "Return non-nil when MATCHER selects the entry clock ELEMENT sits in.
+A nil MATCHER selects everything.  The tags are read at the element's own
+position so that inheritance applies and a `#+FILETAGS:' tag written once
+at the top of a project file reaches every clock beneath it.  The parsed
+element carries the clocked headline's own tags alone, which for such a
+file is nothing at all."
+  (or (null matcher)
+      (save-excursion
+        (goto-char (org-element-property :begin element))
+        (and (funcall matcher nil (org-get-tags) nil) t))))
+
+(defun org-clock-projects--map-clocks (files function)
+  "Return every non-nil value FUNCTION returns over the clock elements of FILES.
+FUNCTION is called with a clock element, the file holding it, and that
+file's `#+TITLE' and `#+CATEGORY' — the two file-level defaults the CSV
+package's parser needs, read once per file rather than once per clock.
+The file's buffer is current and widened throughout, so a caller may ask
+Org anything that depends on a clock's position, tag inheritance
+included.
+
+Clocks are read out of a parse of the buffer rather than by searching for
+clock lines, because whether a clock is closed and whether its timestamp
+is a range are what decide if it records finished time, and only the
+parser answers those.
+
+`org-clock-csv--get-org-data' is read directly, as is the parser in
+`org-clock-projects--entries'.  That package is unmaintained and offers
+no filtering interface of any kind — its only knobs are the header string
+and the row formatter — so depending on exactly these two internals is a
+deliberate and recorded decision rather than an oversight."
+  (let (collected)
+    (dolist (file files)
+      (with-current-buffer (org-clock-projects--org-buffer file)
+        (org-with-wide-buffer
+         (let* ((ast (org-element-parse-buffer))
+                (title (org-clock-csv--get-org-data 'TITLE ast file))
+                (category (org-clock-csv--get-org-data 'CATEGORY ast "")))
+           (setq collected
+                 (nconc collected
+                        (org-element-map ast 'clock
+                          (lambda (element)
+                            (funcall function element file title category)))))))))
+    collected))
+
+(defun org-clock-projects--export-files (record wide)
+  "Return the existing files a scan of RECORD reads.
+By default that is the project's own file together with the archives Org
+resolves for it, which follow `org-archive-location', honour a subtree's
+own `:ARCHIVE:' property, and are dropped when they do not exist — a
+project that has never been archived is not a special case.  With WIDE
+non-nil the scan reaches every agenda file and its archives instead,
+which is the way to find work carrying the project's tag but filed
+somewhere else.
+
+Files that do not exist are dropped, because the CSV package asserts the
+existence of every file it is handed."
+  (seq-filter
+   #'file-exists-p
+   (org-add-archive-files
+    (if wide
+        (org-agenda-files t)
+      (delq nil (list (org-clock-projects--truename
+                       (org-clock-projects--record-file record))))))))
+
+(defun org-clock-projects--entries (files match period)
+  "Return the clock entries FILES hold for PERIOD, oldest first.
+MATCH is a tag match as `org-make-tags-matcher' reads one, or nil to take
+every entry the period holds.
+
+The entries are the CSV package's own plists, carrying the file and the
+position of their clock line besides, so that a finding can name the line
+it is about and take a reader there.  The rows are sorted by start time
+because a CSV read by eye, and diffed against the one exported last
+month, has to be in the order the work happened in."
+  (let ((from (org-clock-projects--time-stamp (plist-get period :start)))
+        (until (org-clock-projects--time-stamp (plist-get period :end)))
+        (matcher (and match (cdr (org-make-tags-matcher match)))))
+    (sort (org-clock-projects--map-clocks
+           files
+           (lambda (element file title category)
+             (and (org-clock-projects--clock-closed-p element)
+                  (org-clock-projects--in-period-p
+                   (org-clock-projects--clock-start element)
+                   (org-clock-projects--clock-end element)
+                   from until)
+                  (org-clock-projects--matches-p element matcher)
+                  (let ((entry (org-clock-csv--parse-element
+                                element title category)))
+                    (and entry
+                         (append (list :file file
+                                       :position (org-element-property
+                                                  :begin element))
+                                 entry))))))
+          (lambda (a b) (string< (plist-get a :start) (plist-get b :start))))))
+
+(defun org-clock-projects--entry-minutes (entry)
+  "Return the minutes ENTRY runs for.
+Measured between the two timestamps the row carries rather than read off
+the clock line's own total, so that a check judges exactly what the
+export reports."
+  (/ (- (org-time-string-to-seconds (plist-get entry :end))
+        (org-time-string-to-seconds (plist-get entry :start)))
+     60))
+
+
+;;;; Exporting
+;;
+;; Entries are written whole and the exporter never clips.  The CSV is a
+;; transcript of the CLOCK lines, which is what lets an invoice be checked
+;; against the Org file line by line; the price is that an entry straddling a
+;; period's edge appears in both adjacent exports, and trimming it to a
+;; billing period belongs downstream with whoever renders that invoice.
+
+(defcustom org-clock-projects-export-directory "~/"
+  "Directory the exported CSV files are written to.
+It is created if it does not exist."
+  :type 'directory)
+
+(defcustom org-clock-projects-export-file-function
+  #'org-clock-projects-export-default-file-name
+  "Function naming the file one export lands in.
+It is called with the project's record and the period plist, and returns
+a bare file name, which is expanded against
+`org-clock-projects-export-directory'.  The period is handed over whole
+because its kind is what tells a quarter from an arbitrary range that
+happens to fall on the same two days, which its bounds alone cannot."
+  :type 'function)
+
+(defun org-clock-projects-export-default-file-name (record period)
+  "Return the bare file name RECORD's PERIOD export takes.
+`<period>-org-clock-<file-base>.csv'.  The tail is not decoration: the
+downstream invoice build derives the same name from its own period, and a
+month's export has to match it exactly for the two to meet."
+  (format "%s-org-clock-%s.csv"
+          (org-clock-projects--period-label period)
+          (file-name-base (org-clock-projects--record-file record))))
+
+(defun org-clock-projects--export-path (record period)
+  "Return the path RECORD's PERIOD export is written to."
+  (expand-file-name (funcall org-clock-projects-export-file-function
+                             record period)
+                    org-clock-projects-export-directory))
+
+(defun org-clock-projects--write (path entries)
+  "Write ENTRIES to PATH as CSV, and return how many rows it holds.
+The header and each row come from `org-clock-csv-header' and
+`org-clock-csv-row-fmt', so anyone who has arranged their columns keeps
+them and this stays one shape of file rather than becoming a second one.
+An empty period still leaves a header behind: downstream tooling looks
+the file up by name, and a quiet month should read as zero rows rather
+than as a broken build."
+  (make-directory (file-name-directory path) t)
+  (with-temp-file path
+    (insert org-clock-csv-header "\n")
+    (dolist (entry entries)
+      (insert (funcall org-clock-csv-row-fmt entry) "\n")))
+  (length entries))
+
+(defun org-clock-projects--read-record ()
+  "Read one of the registered projects and return its record.
+The candidates are the registry's, not the projects clocked into this
+session: a period is invoiced for whether or not it was worked on today.
+Each is offered under the name it is registered by, used exactly as it
+was given.  The qualification `org-clock-projects-name' performs is for
+names *derived* from a path, which can collide by accident; a name
+somebody chose is theirs."
+  (let ((candidates (mapcar (lambda (record)
+                              (cons (org-clock-projects--record-name record)
+                                    record))
+                            (org-clock-projects--records))))
+    (unless candidates
+      (user-error "No projects are registered; see `org-clock-projects-projects-function'"))
+    (cdr (assoc (completing-read "Project: " candidates nil t) candidates))))
+
+
+;;;; Checks
+;;
+;; A finding is a plist of `:kind', `:file', `:position' and `:summary'.  The
+;; export raises on the two kinds that corrupt an invoice by themselves — time
+;; the CSV cannot carry, and time it would carry twice — and the check renders
+;; all four.  One judgement, made once, that the two commands differ only in
+;; what they do with.
+
+(defcustom org-clock-projects-duration-threshold 10
+  "Hours above which a single clock entry is reported as questionable.
+The guard is on the length of an entry rather than on the period's edges.
+A boundary check catches a forgotten clock-out only when it happens to
+straddle one, where a stretch no working day reaches is visible wherever
+in the period it falls."
+  :type 'number)
+
+(defun org-clock-projects--finding (kind file position summary)
+  "Return a finding of KIND about POSITION in FILE, described by SUMMARY."
+  (list :kind kind :file file :position position :summary summary))
+
+(defun org-clock-projects--open-clock-findings (files period)
+  "Return a finding for every clock in FILES still running when PERIOD ended.
+This one cannot be left to anything downstream: `org-clock-csv' takes
+closed clocks and says nothing about the rest, so an open clock's time
+goes missing from the invoice with no trace of it in the output.  It
+cannot be clipped either, having no end, which is why a clock opened
+before the period is reported as readily as one opened inside it.  A
+clock opened after the period closed can hold none of its time and is
+left alone — invoicing an old month while clocked on today's work is the
+ordinary case."
+  (let ((until (org-clock-projects--time-stamp (plist-get period :end))))
+    (org-clock-projects--map-clocks
+     files
+     (lambda (element file _title _category)
+       (let ((start (org-clock-projects--clock-start element)))
+         (and (not (org-clock-projects--clock-closed-p element))
+              (string< start until)
+              (org-clock-projects--finding
+               'open-clock file (org-element-property :begin element)
+               (format "%s: %s has been running since %s"
+                       (file-name-nondirectory file)
+                       (or (org-clock-projects--clock-task element) "a clock")
+                       start))))))))
+
+(defun org-clock-projects--overlap-findings (entries)
+  "Return a finding for each of ENTRIES that covers minutes another already does.
+Two projects clocked at once is what holding several clocks is for and is
+never reported; two entries of one project covering the same minutes bill
+them twice.  Only entries one project selected are ever compared, so the
+question never arises between projects.
+
+ENTRIES arrive oldest first, so an entry overlaps an earlier one exactly
+when it begins before the furthest end reached so far, and one pass finds
+every such pair.  The later entry is the one reported: it is the one
+whose start landed inside a stretch already accounted for."
+  (let (findings furthest)
+    (dolist (entry entries)
+      (when (and furthest
+                 (string< (plist-get entry :start) (plist-get furthest :end)))
+        (push (org-clock-projects--finding
+               'overlap (plist-get entry :file) (plist-get entry :position)
+               (format "%s: %s starting %s runs alongside %s"
+                       (file-name-nondirectory (plist-get entry :file))
+                       (plist-get entry :task)
+                       (plist-get entry :start)
+                       (plist-get furthest :task)))
+              findings))
+      (when (or (null furthest)
+                (string< (plist-get furthest :end) (plist-get entry :end)))
+        (setq furthest entry)))
+    (nreverse findings)))
+
+(defun org-clock-projects--long-entry-findings (entries)
+  "Return a finding for each of ENTRIES longer than the duration threshold.
+`org-clock-projects-duration-threshold' is in hours, and an entry of
+exactly that length passes."
+  (let ((limit (* 60 org-clock-projects-duration-threshold)))
+    (delq nil
+          (mapcar
+           (lambda (entry)
+             (let ((minutes (org-clock-projects--entry-minutes entry)))
+               (when (> minutes limit)
+                 (org-clock-projects--finding
+                  'long-entry (plist-get entry :file) (plist-get entry :position)
+                  (format "%s: %s ran %s from %s"
+                          (file-name-nondirectory (plist-get entry :file))
+                          (plist-get entry :task)
+                          (org-duration-from-minutes minutes 'h:mm)
+                          (plist-get entry :start))))))
+           entries))))
+
+(defun org-clock-projects--file-tagged-p (file tag)
+  "Return non-nil when TAG is written anywhere in FILE.
+The export finds a project's time by its tag, so a file of the project's
+own that never mentions the tag exports nothing and gives no reason why.
+A tag declared once at the top of the file and one written on each entry
+both count: either is a file the tag match can reach."
+  (with-current-buffer (org-clock-projects--org-buffer file)
+    (org-with-wide-buffer
+     (and (assoc tag (org-get-buffer-tags)) t))))
+
+(defun org-clock-projects--missing-tag-findings (record)
+  "Return a finding for each of RECORD's own files that does not carry its tag.
+Always the project's own file and its existing archives, whatever scope
+the scan was given.  Widening the scan is how work tagged for this
+project but filed elsewhere is found, so the agenda files it reaches are
+not expected to carry the tag, and asking the question of them would bury
+the one file that should under every file that never claimed to.  A
+record with no tag has nothing that could be missing."
+  (let ((tag (org-clock-projects--record-tag record)))
+    (when tag
+      (delq nil
+            (mapcar
+             (lambda (file)
+               (unless (org-clock-projects--file-tagged-p file tag)
+                 (org-clock-projects--finding
+                  'missing-tag file 1
+                  (format "%s carries no \"%s\" anywhere, so the export reads past it"
+                          (file-name-nondirectory file) tag))))
+             (org-clock-projects--export-files record nil))))))
+
+(defun org-clock-projects--findings (record files period entries)
+  "Return everything questionable about RECORD's PERIOD in FILES and ENTRIES.
+FILES is the set that was scanned and ENTRIES what the period and the tag
+selected out of it.  Four things are looked for: a clock still running, a
+pair of selected entries covering the same minutes, an entry longer than
+`org-clock-projects-duration-threshold' hours, and one of RECORD's own
+files that does not carry RECORD's tag."
+  (append (org-clock-projects--open-clock-findings files period)
+          (org-clock-projects--overlap-findings entries)
+          (org-clock-projects--long-entry-findings entries)
+          (org-clock-projects--missing-tag-findings record)))
+
+(defun org-clock-projects--raise (findings)
+  "Stop, counting FINDINGS by kind, when there is anything in them.
+Nothing has been written by the time this runs, because a half-written
+export is exactly the thing that would be believed."
+  (when findings
+    (user-error
+     "Nothing exported: %s.  `org-clock-projects-check' shows them; a double prefix exports anyway"
+     (mapconcat
+      (lambda (kind)
+        (let ((n (seq-count (lambda (finding) (eq kind (plist-get finding :kind)))
+                            findings)))
+          (format "%d %s finding%s" n kind (if (= n 1) "" "s"))))
+      (seq-uniq (mapcar (lambda (finding) (plist-get finding :kind)) findings))
+      " and "))))
+
+(defconst org-clock-projects--check-buffer "*org-clock-projects-check*"
+  "Buffer the check renders its report into.")
+
+(defun org-clock-projects--visit-finding (button)
+  "Go to the place BUTTON's finding is about.
+The target buffer is made current rather than merely shown: the next
+thing a reader does is repair the clock line, and a report that only
+displayed it would leave them typing into the report."
+  (pop-to-buffer (org-clock-projects--org-buffer
+                  (button-get button 'org-clock-projects-file)))
+  (widen)
+  (goto-char (button-get button 'org-clock-projects-position))
+  (org-fold-show-context))
+
+(defun org-clock-projects--insert-finding (finding)
+  "Insert FINDING as one line that goes to the place it is about.
+The kind leads the line because it is the one thing every finding has to
+say, and the line is a button whole, so a reader can act on it from
+anywhere along it."
+  (insert-text-button
+   (format "%s  %s" (plist-get finding :kind) (plist-get finding :summary))
+   'action #'org-clock-projects--visit-finding
+   'org-clock-projects-file (plist-get finding :file)
+   'org-clock-projects-position (plist-get finding :position)
+   'follow-link t
+   'help-echo "Go to this clock line")
+  (insert "\n"))
+
+(defun org-clock-projects--render-findings (record period findings)
+  "Render FINDINGS about RECORD's PERIOD into the report buffer and show it.
+Every finding is one line and one button and the prose around them is
+neither, so a reader can take each finding to the line it names.  A run
+that turned nothing up says as much, because an empty buffer and a
+command that quietly did nothing read alike."
+  (let ((buffer (get-buffer-create org-clock-projects--check-buffer)))
+    (with-current-buffer buffer
+      (special-mode)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "%s over %s: %s\n\n"
+                        (org-clock-projects--record-name record)
+                        (org-clock-projects--period-label period)
+                        (if findings
+                            (format "%d to look at" (length findings))
+                          "nothing to look at")))
+        (dolist (finding findings)
+          (org-clock-projects--insert-finding finding))
+        (goto-char (point-min))))
+    (pop-to-buffer buffer)))
+
+
+;;;; The export and check commands
+
+(defun org-clock-projects--wide-p (arg)
+  "Return non-nil when prefix ARG asks for the scan to reach the agenda files."
+  (memq (prefix-numeric-value arg) '(4 64)))
+
+;;;###autoload
+(defun org-clock-projects-export (&optional arg)
+  "Export a project's clock entries for a period to CSV.
+The rows are the CLOCK lines themselves, written whole and oldest first,
+so an invoice can be checked against the Org file line by line.  An entry
+straddling the period's edge therefore appears in both adjacent exports;
+trimming it to a billing period is the job of whoever renders the
+invoice.
+
+ARG both widens the scan and waives the checks:
+
+  none             the project's own files, both checks
+  \\[universal-argument]              every agenda file, both checks
+  \\[universal-argument] \\[universal-argument]          the project's own files, neither check
+  \\[universal-argument] \\[universal-argument] \\[universal-argument]      every agenda file, neither check
+
+Waiving is unsafe by construction, so it is deliberately the harder
+gesture, and it waives both checks rather than one: reproducing an
+invoice already issued over data known to be bad is the reason to have
+the override at all."
+  (interactive "P")
+  (let* ((wide (org-clock-projects--wide-p arg))
+         (waived (memq (prefix-numeric-value arg) '(16 64)))
+         (record (org-clock-projects--read-record))
+         (period (org-clock-projects--read-period))
+         (files (org-clock-projects--export-files record wide))
+         (entries (org-clock-projects--entries
+                   files (org-clock-projects--record-tag record) period)))
+    (unless waived
+      (org-clock-projects--raise
+       (seq-filter (lambda (finding)
+                     (memq (plist-get finding :kind) '(open-clock overlap)))
+                   (org-clock-projects--findings record files period entries))))
+    (let* ((path (org-clock-projects--export-path record period))
+           (rows (org-clock-projects--write path entries)))
+      (message "Exported %d row%s to %s"
+               rows (if (= rows 1) "" "s") (abbreviate-file-name path)))))
+
+;;;###autoload
+(defun org-clock-projects-check (&optional arg)
+  "Report questionable clock data for a project and period.
+The same project and the same period as the export, and the same ARG
+widening the scan, but nothing is written and nothing refused: every
+finding is rendered into `*org-clock-projects-check*', one line each,
+each of them going to what it is about.  This is the command to reach for
+once an export has stopped, and the one to run before invoicing so that
+everything questionable arrives at once rather than one error at a time."
+  (interactive "P")
+  (let* ((record (org-clock-projects--read-record))
+         (period (org-clock-projects--read-period))
+         (files (org-clock-projects--export-files
+                 record (org-clock-projects--wide-p arg)))
+         (entries (org-clock-projects--entries
+                   files (org-clock-projects--record-tag record) period)))
+    (org-clock-projects--render-findings
+     record period
+     (org-clock-projects--findings record files period entries))))
+
+
+;;;; Rolling clock ranges
+;;
+;; These extend Org's `:block' vocabulary rather than this package's, so they
+;; install when the file loads rather than with `org-clock-projects-mode'.  A
+;; clocktable written months ago must keep resolving whether or not the mode is
+;; on today.
+
+(defconst org-clock-projects--last-periods-regexp
+  "\\`last\\(day\\|week\\|semimonth\\|month\\|quarter\\|year\\)s-\\(.+\\)\\'"
+  "Regexp matching a `last<unit>s-N' range keyword.
+Group 1 is the unit; group 2 is the count exactly as it was written.
+The units are the six `:step' accepts, so the two vocabularies match.")
+
+(defconst org-clock-projects--last-periods-keys
+  '((day . today)
+    (week . thisweek)
+    (month . thismonth)
+    (quarter . thisq)
+    (year . thisyear))
+  "Org's own range keyword for the period of each unit currently in progress.
+`semimonth' is absent because Org has no keyword for it.")
+
+(defun org-clock-projects--last-periods-parse (key)
+  "Return (UNIT . WRITTEN) when KEY is a `last<unit>s-N' keyword, else nil.
+WRITTEN is the count as it was typed, which need not be a number: the
+shift guard needs to recognise a malformed count as one of these
+keywords, so parsing stays separate from validating it.  Org's singular
+`lastweek' is a shift to the previous week and does not match here; only
+the plural span form does."
+  (let ((skey (format "%s" key)))
+    (when (string-match org-clock-projects--last-periods-regexp skey)
+      (cons (intern (match-string 1 skey)) (match-string 2 skey)))))
+
+(defun org-clock-projects--last-periods-parse-count (written key)
+  "Return WRITTEN, the count typed in range keyword KEY, as a number.
+N counts periods rather than offsets, so the smallest window is one."
+  (unless (string-match-p "\\`[0-9]+\\'" written)
+    (user-error "Time block %s counts periods, so N must be a whole number" key))
+  (let ((n (string-to-number written)))
+    (when (= n 0)
+      (user-error "Time block %s counts periods, so N must be at least 1" key))
+    n))
+
+(defun org-clock-projects--semimonth-index (time)
+  "Return the number of the semimonth holding TIME.
+Numbering the halves of every month consecutively is what lets a window
+step back over month and year boundaries without a special case at each."
+  (pcase-let ((`(,_ ,_ ,_ ,d ,m ,y . ,_) (decode-time time)))
+    (+ (* 24 y) (* 2 (1- m)) (if (< d 16) 0 1))))
+
+(defun org-clock-projects--semimonth-start (index)
+  "Return the time at which the semimonth numbered INDEX begins."
+  (let ((half (mod index 24)))
+    (org-encode-time 0 0 org-extend-today-until
+                     (if (cl-evenp half) 1 16)
+                     (1+ (/ half 2))
+                     (/ index 24))))
+
+(defun org-clock-projects--last-periods-range (unit count time wstart mstart)
+  "Return the last COUNT whole UNIT periods ending with the one holding TIME.
+The value is a list of the window's start and end times.  WSTART and
+MSTART are the week and month start days.
+
+Every unit but `semimonth' resolves through Org itself, so the window
+lands on exactly the boundaries of the reports it is read alongside.
+Org has no semimonth keyword to borrow, so that unit counts halves of
+months directly, and it ignores MSTART: `:step semimonth' always splits
+a month on the 1st and the 16th, so a window honouring MSTART would open
+somewhere its own steps never land."
+  (if (eq unit 'semimonth)
+      (let ((index (org-clock-projects--semimonth-index time)))
+        (list (org-clock-projects--semimonth-start (- index (1- count)))
+              (org-clock-projects--semimonth-start (1+ index))))
+    (let ((key (alist-get unit org-clock-projects--last-periods-keys)))
+      ;; The window opens where the shift COUNT-1 periods back opens, and closes
+      ;; where the period in progress closes.  Org reads a shift off the end of
+      ;; a string but dispatches the plain keyword on a symbol.
+      (list (car (org-clock-special-range
+                  (format "%s-%d" key (1- count)) time nil wstart mstart))
+            (nth 1 (org-clock-special-range key time nil wstart mstart))))))
+
+(defun org-clock-projects--clock-special-range (orig key &optional time as-strings
+                                                     wstart mstart)
+  "Resolve a `last<unit>s-N' KEY, delegating every other KEY to ORIG.
+
+KEY names the last N whole periods of one of the six units `:step'
+accepts, ending with and including the period currently in progress.
+So `lastweeks-1' is the current week alone, and equals `thisweek', while
+`lastweeks-8' is that week together with the seven before it.  Measuring
+the window in the same unit as its boundaries is what keeps every period
+in it whole.
+
+Every clock report funnels through this function, which is what makes
+the keywords work in a plain clocktable, a stepped clocktable and a
+clockmatrix alike.  TIME, AS-STRINGS, WSTART and MSTART keep the
+meanings Org gives them."
+  (pcase (org-clock-projects--last-periods-parse key)
+    (`nil (funcall orig key time as-strings wstart mstart))
+    (`(,unit . ,written)
+     (let* ((count (org-clock-projects--last-periods-parse-count written key))
+            (range (org-clock-projects--last-periods-range
+                    unit count time wstart mstart))
+            (text (format "the last %d %s%s" count unit (if (= count 1) "" "s"))))
+       (if (not as-strings)
+           (append range (list text))
+         (let ((fmt (org-time-stamp-format 'with-time)))
+           (list (format-time-string fmt (car range))
+                 (format-time-string fmt (nth 1 range))
+                 text)))))))
+
+(defun org-clock-projects--clocktable-shift-guard (&rest _)
+  "Refuse to shift a clocktable whose `:block' spans a count of periods.
+Org's shift command matches the digits of `lastweeks-8' as though they
+were a bare year and rewrites the block to `9', destroying the parameter
+with nothing left in the buffer to recover it from.  Its own fallback
+already turns away the blocks it cannot shift, `untilnow' among them;
+these join that set, under the same message, so the refusal is
+indistinguishable from any other."
+  (save-excursion
+    (goto-char (line-beginning-position))
+    (when (and (looking-at
+                "^[ \t]*#\\+BEGIN:[ \t]+clocktable\\>.*?:block[ \t]+\\(\\S-+\\)")
+               (org-clock-projects--last-periods-parse (match-string 1)))
+      (user-error "Cannot shift clocktable block"))))
+
+(advice-add 'org-clock-special-range :around
+            #'org-clock-projects--clock-special-range)
+(advice-add 'org-clocktable-shift :before
+            #'org-clock-projects--clocktable-shift-guard)
+
+
+;;;; Clock matrix dynamic block
+;;
+;; Every cell is a sum Org itself computes, through `org-clock-get-table-data',
+;; which clips an entry at the period boundaries it is handed.  The exporter
+;; writes entries whole, so for any period holding an entry that straddles one
+;; of its edges the two disagree by exactly the clipped share.  Both are right,
+;; and the difference is deliberate: the matrix is a report and has to stay
+;; comparable with the clocktable a reader would write beside it, while the CSV
+;; is the evidence behind an invoice, whose clipping belongs downstream with
+;; whoever renders that invoice.
+;;
+;; Like the range keywords, the block installs at load rather than with
+;; `org-clock-projects-mode', so a document holding one keeps refreshing.
+
+(defconst org-clock-projects--clockmatrix-step-headers
+  '((day . "Day")
+    (week . "Week")
+    (semimonth . "Semimonth")
+    (month . "Month")
+    (quarter . "Quarter")
+    (year . "Year"))
+  "Label-column header for each `:step' a `clockmatrix' block accepts.")
+
+(defun org-clock-projects--clockmatrix-time (value)
+  "Resolve VALUE from a clockmatrix range specification into a time.
+VALUE is an absolute day number as used by the agenda, or an Org
+timestamp string.  Anything else, nil included, is an endpoint that never
+resolved, and reports the same missing range an unset one does."
+  (pcase value
+    ((and (pred numberp) n)
+     (pcase-let ((`(,m ,d ,y) (calendar-gregorian-from-absolute n)))
+       ;; Midnight, as everywhere else in the matrix: a period is a stretch of
+       ;; calendar days.
+       (org-encode-time 0 0 0 d m y)))
+    ((and (pred stringp) timestamp)
+     (seconds-to-time (org-matcher-time timestamp)))
+    (_ (user-error
+        "Clockmatrix needs a range: set `:block', or both `:tstart' and `:tend'"))))
+
+(defun org-clock-projects--clockmatrix-range (params)
+  "Return the range PARAMS report on, as a cons of start and end times.
+`:block' takes precedence over `:tstart' and `:tend', as in clocktable.
+It resolves through the shared period core, so a matrix cell and an
+exported CSV are cut on the same boundaries."
+  (pcase (plist-get params :block)
+    (`nil (cons (org-clock-projects--clockmatrix-time (plist-get params :tstart))
+                (org-clock-projects--clockmatrix-time (plist-get params :tend))))
+    (block
+      (let ((period (org-clock-projects--period
+                     block
+                     (or (plist-get params :wstart) 1)
+                     (or (plist-get params :mstart) 1))))
+        ;; `untilnow' resolves without a start.  A matrix tiles its range into
+        ;; periods, so an open-ended one is no range at all, and says so in the
+        ;; words an absent range gets.
+        (cons (or (plist-get period :start)
+                  (org-clock-projects--clockmatrix-time nil))
+              (plist-get period :end))))))
+
+(defun org-clock-projects--clockmatrix-step-end (start step wstart mstart)
+  "Return the end of the STEP period beginning at START.
+WSTART and MSTART are the week and month start days.  The calendar
+arithmetic follows Org's own stepped clocktables, and every step ends at
+midnight: a report whose weeks opened at `org-extend-today-until' while
+its months opened at midnight would disagree with itself about where a
+period starts, and so would the CSV cut from the same range."
+  (pcase-let ((`(,_ ,_ ,_ ,d ,m ,y ,dow . ,_) (decode-time start)))
+    (pcase step
+      (`day (org-encode-time 0 0 0 (1+ d) m y))
+      (`week
+       (let ((offset (if (= dow wstart) 7 (mod (- wstart dow) 7))))
+         (org-encode-time 0 0 0 (+ d offset) m y)))
+      (`semimonth (org-encode-time 0 0 0
+                                   (if (< d 16) 16 1)
+                                   (if (< d 16) m (1+ m)) y))
+      (`month (org-encode-time 0 0 0 mstart (1+ m) y))
+      (`quarter (org-encode-time 0 0 0 mstart (+ 3 m) y))
+      (`year (org-encode-time 0 0 0 1 1 (1+ y)))
+      (_ (user-error "Unknown `:step' specification: %S" step)))))
+
+(defun org-clock-projects--clockmatrix-periods (start end step wstart mstart)
+  "Return the STEP periods tiling START to END, as (FROM . TO) conses.
+The first and last period are clipped to the range, so the periods
+partition it exactly.  WSTART and MSTART are the week and month start
+days."
+  (let (periods)
+    (while (time-less-p start end)
+      (let ((next (org-clock-projects--clockmatrix-step-end
+                   start step wstart mstart)))
+        ;; A `:wstart' outside 0-6 can land the next period on the current one,
+        ;; which would loop forever.  Refuse rather than hang.
+        (unless (time-less-p start next)
+          (user-error "Clockmatrix `:step' %s does not advance past %s: \
+check `:wstart' (0-6) and `:mstart' (1-31)"
+                      step (format-time-string "%Y-%m-%d" start)))
+        (push (cons start (if (time-less-p end next) end next)) periods)
+        (setq start next)))
+    (nreverse periods)))
+
+(defun org-clock-projects--clockmatrix-label (start step)
+  "Return the row label for the STEP period beginning at START.
+A week is labelled by the date it starts on."
+  (pcase step
+    (`month (format-time-string "%Y-%m" start))
+    (`year (format-time-string "%Y" start))
+    (`quarter (pcase-let ((`(,_ ,_ ,_ ,_ ,m ,y . ,_) (decode-time start)))
+                (format "%d-Q%d" y (1+ (/ (1- m) 3)))))
+    (_ (format-time-string "%Y-%m-%d" start))))
+
+(defun org-clock-projects--clockmatrix-own-files (record label)
+  "Return the existing files holding time clocked for RECORD.
+That is the project's own file together with whatever archives Org
+resolves for it, from `org-archive-location' and from any `:ARCHIVE:'
+property the file sets.  Asking Org is what keeps the report reading the
+files the archive command actually writes to.
+
+LABEL names the project in the warning a missing main file raises: that
+is a misconfiguration rather than an absence of clocked time.  A missing
+archive is silent, because most projects never accumulate one."
+  (let ((main (expand-file-name (org-clock-projects--record-file record)
+                                org-directory)))
+    (if (file-exists-p main)
+        (org-add-archive-files (list main))
+      (warn "Clockmatrix: project %S has no file at %s, so it reports no time.  \
+Set :file on its entry in the registry `org-clock-projects-projects-function' \
+returns, or use `:scope agenda-with-archives'"
+            label main)
+      nil)))
+
+(defun org-clock-projects--clockmatrix-record (tag)
+  "Return the registered record carrying TAG, or one derived from TAG alone.
+A `:tags' column names a project exactly as the registry does, so one
+registered under a file name of its own is still read from that file; a
+tag registered nowhere falls back to `<tag>.org'."
+  (or (cl-find tag (org-clock-projects--records)
+               :key #'org-clock-projects--record-tag :test #'equal)
+      (org-clock-projects--record (list :tag tag))))
+
+(defun org-clock-projects--clockmatrix-column (record scope)
+  "Return the column reporting RECORD's clocked time under SCOPE.
+A column is a plist of the `:label' heading it, the `:files' to scan and
+the `:match' picking RECORD's entries out of them.  SCOPE is nil for the
+project's own files, or `agenda-with-archives'.
+
+The match travels with the files rather than being derived once from
+them: under `agenda-with-archives' every column scans the same agenda-wide
+file set, and a column without a match of its own would sum every project
+into itself.  A record with no tag has nothing to match on, so it is
+headed by its file's base name and takes that file whole."
+  (let* ((tag (org-clock-projects--record-tag record))
+         (label (or tag (file-name-base
+                         (org-clock-projects--record-file record)))))
+    (list :label label
+          :match tag
+          :files (pcase scope
+                   (`nil (org-clock-projects--clockmatrix-own-files record label))
+                   (`agenda-with-archives
+                    (org-add-archive-files (org-agenda-files t)))
+                   (_ (user-error "Unknown `:scope' for clockmatrix: %S" scope))))))
+
+(defun org-clock-projects--clockmatrix-columns (params)
+  "Return the columns a clockmatrix block with PARAMS reports on.
+They are the registered projects in registration order, or the projects
+`:tags' names outright."
+  (let ((tags (plist-get params :tags))
+        (scope (plist-get params :scope)))
+    (mapcar (lambda (record)
+              (org-clock-projects--clockmatrix-column record scope))
+            (if tags
+                (mapcar #'org-clock-projects--clockmatrix-record tags)
+              (org-clock-projects--records)))))
+
+(defun org-clock-projects--clockmatrix-minutes (files match start end)
+  "Return the minutes MATCH selects in FILES between START and END.
+A nil MATCH takes every entry in FILES.  Delegating the sum to Org is
+what makes a cell agree with the equivalent clocktable, and clips clocks
+that cross START or END rather than double-counting or dropping them."
+  (let ((params (list :maxlevel 0
+                      :match match
+                      :tstart (format-time-string (org-time-stamp-format t t) start)
+                      :tend (format-time-string (org-time-stamp-format t t) end))))
+    (cl-loop for file in files
+             sum (with-current-buffer (or (find-buffer-visiting file)
+                                          (find-file-noselect file))
+                   (save-excursion
+                     (save-restriction
+                       (widen)
+                       (or (nth 1 (org-clock-get-table-data file params)) 0)))))))
+
+(defun org-clock-projects--clockmatrix-rows (columns periods step)
+  "Return one row per period in PERIODS.
+Each row is a cons of the period's label and the minutes each of COLUMNS
+reports in it."
+  (org-agenda-prepare-buffers
+   (cl-remove-duplicates
+    (apply #'append (mapcar (lambda (column) (plist-get column :files)) columns))
+    :test #'equal))
+  (mapcar (lambda (period)
+            (cons (org-clock-projects--clockmatrix-label (car period) step)
+                  (mapcar (lambda (column)
+                            (org-clock-projects--clockmatrix-minutes
+                             (plist-get column :files)
+                             (plist-get column :match)
+                             (car period) (cdr period)))
+                          columns)))
+          periods))
+
+(defun org-clock-projects--clockmatrix-prune-columns (columns rows)
+  "Drop the entries of COLUMNS with no clocked time anywhere in ROWS.
+Return a cons of the surviving columns and the correspondingly narrowed
+ROWS."
+  (let ((kept (cl-loop for i from 0 below (length columns)
+                       when (> (cl-loop for row in rows sum (nth i (cdr row))) 0)
+                       collect i)))
+    (cons (mapcar (lambda (i) (nth i columns)) kept)
+          (mapcar (lambda (row)
+                    (cons (car row) (mapcar (lambda (i) (nth i (cdr row))) kept)))
+                  rows))))
+
+(defun org-clock-projects--clockmatrix-duration-format ()
+  "Return `org-duration-format' with every unit above hours dropped.
+Monthly totals read as 108:30 rather than 4d 12:30, while the rest of
+the configured format is left alone."
+  (if (not (consp org-duration-format))
+      org-duration-format
+    (or (cl-remove-if (lambda (entry)
+                        (let ((unit (car entry)))
+                          (and (stringp unit)
+                               (> (or (cdr (assoc unit org-duration-units)) 0) 60))))
+                      org-duration-format)
+        'h:mm)))
+
+(defun org-clock-projects--clockmatrix-cell (minutes)
+  "Format MINUTES as a table cell, left blank when there is no time."
+  (if (> minutes 0)
+      (org-duration-from-minutes
+       minutes (org-clock-projects--clockmatrix-duration-format))
+    ""))
+
+(defun org-clock-projects--clockmatrix-row-total (row)
+  "Return the total minutes in ROW, a label followed by per-project minutes."
+  (apply #'+ (cdr row)))
+
+(defun org-clock-projects--clockmatrix-insert-row (cells)
+  "Insert CELLS as one Org table row."
+  (insert "| " (mapconcat #'identity cells " | ") " |\n"))
+
+(defun org-dblock-write:clockmatrix (params)
+  "Write a `clockmatrix' dynamic block according to PARAMS.
+Render clocked time as a matrix with calendar periods down the rows and
+projects across the columns, totalled on both axes.  Columns default to
+the registered projects; one with no time anywhere in the range is
+dropped.  See the README for the full parameter list."
+  (let* ((step (or (plist-get params :step) 'month))
+         (wstart (or (plist-get params :wstart) 1))
+         (mstart (or (plist-get params :mstart) 1))
+         (skip0 (plist-get params :stepskip0))
+         (show-total (if (plist-member params :total)
+                         (plist-get params :total)
+                       t))
+         (header (or (alist-get step org-clock-projects--clockmatrix-step-headers)
+                     (user-error "Unknown `:step' specification: %S" step)))
+         (range (org-clock-projects--clockmatrix-range params))
+         (periods (org-clock-projects--clockmatrix-periods
+                   (car range) (cdr range) step wstart mstart))
+         (columns (org-clock-projects--clockmatrix-columns params))
+         (pruned (org-clock-projects--clockmatrix-prune-columns
+                  columns
+                  (org-clock-projects--clockmatrix-rows columns periods step)))
+         (shown (car pruned))
+         (rows (if skip0
+                   (cl-remove-if (lambda (row)
+                                   (= 0 (org-clock-projects--clockmatrix-row-total
+                                         row)))
+                                 (cdr pruned))
+                 (cdr pruned)))
+         (table-start (point)))
+    (org-clock-projects--clockmatrix-insert-row
+     (append (list header)
+             (mapcar (lambda (column) (plist-get column :label)) shown)
+             (and show-total (list "Total"))))
+    (insert "|-\n")
+    (dolist (row rows)
+      (org-clock-projects--clockmatrix-insert-row
+       (append (list (car row))
+               (mapcar #'org-clock-projects--clockmatrix-cell (cdr row))
+               (and show-total
+                    (list (org-clock-projects--clockmatrix-cell
+                           (org-clock-projects--clockmatrix-row-total row)))))))
+    (when show-total
+      (insert "|-\n")
+      (org-clock-projects--clockmatrix-insert-row
+       (append (list "Total")
+               (cl-loop for i from 0 below (length shown)
+                        collect (org-clock-projects--clockmatrix-cell
+                                 (cl-loop for row in rows sum (nth i (cdr row)))))
+               (list (org-clock-projects--clockmatrix-cell
+                      (cl-loop for row in rows
+                               sum (org-clock-projects--clockmatrix-row-total
+                                    row)))))))
+    (goto-char table-start)
+    (org-table-align)))
+
+;;;###autoload
+(defun org-clock-projects-clockmatrix ()
+  "Insert a `clockmatrix' dynamic block at point and render it."
+  (interactive)
+  (org-create-dblock (list :name "clockmatrix" :block 'thisyear :step 'month))
+  (org-update-dblock))
+
+(org-dynamic-block-define "clockmatrix" #'org-clock-projects-clockmatrix)
 
 
 ;;;; Installation
