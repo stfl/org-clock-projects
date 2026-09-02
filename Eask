@@ -17,4 +17,7 @@
 (depends-on "org" "9.6")
 (depends-on "org-clock-csv")
 
-(script "test" "eask test ert test/*.el")
+;; Stale bytecode is loaded in preference to newer source, so a test run can
+;; silently exercise the last compile rather than the working tree.  The sweep
+;; leaves .eask alone: that is the dependencies' own bytecode, not ours.
+(script "test" "find . -maxdepth 2 -name '*.elc' -not -path './.eask/*' -delete && eask test ert test/*.el")
