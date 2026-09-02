@@ -291,6 +291,28 @@ it accepts, since a completion list announces nothing about free text."
                    (org-clock-projects-export-test-tasks
                     org-clock-projects-export-test-name)))))
 
+(ert-deftest org-clock-projects-export-test-a-relative-key-is-read-against-the-frozen-clock ()
+  "A relative period is resolved against the session's clock, not the host's.
+`org-clock-special-range' decodes a nil time in C, which reads the system
+clock straight and ignores a stubbed `current-time'.  Every other test
+here runs in the month this suite was written in, so that leak would pass
+by coincidence and start failing when the calendar moved.  This one sits
+in a year that has gone, where the coincidence cannot arise."
+  (org-clock-projects-export-test-with-project
+      `(("corner-cafe.org"
+         . ,(org-clock-projects-export-test-tagged-file
+             "cafe"
+             (org-clock-projects-export-test-clocked
+              "Winter pour" '(2021 2 8 9 0) '(2021 2 8 11 0)))))
+    ;; Re-freezing inside the fixture, which sets the clock it was written
+    ;; against on the way in.
+    (org-clock-projects-test-at (org-clock-projects-test-time-at 2021 3 9 14 37)
+      (org-clock-projects-test-with-prompts
+          (list org-clock-projects-export-test-project "lastmonth")
+        (org-clock-projects-export))
+      (should (equal (org-clock-projects-export-test-exports)
+                     '("2021-02-org-clock-corner-cafe.csv"))))))
+
 (ert-deftest org-clock-projects-export-test-the-period-defaults-to-last-month ()
   "Accepting the period prompt empty invoices the month just ended.
 Invoicing happens in the first days of a month for the month before it,
