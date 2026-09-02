@@ -38,13 +38,17 @@
                      ("Total" "6:45" "1:45" "8:30"))))))
 
 (ert-deftest org-clock-projects-clockmatrix-opens-every-step-at-midnight ()
-  "A step period begins at midnight whatever `org-extend-today-until' says.
-That variable moves the start of a day for capture and for the agenda.
-A matrix honouring it for day, week and year steps while month and
-quarter kept midnight would disagree with itself about which period a
-clock belongs to, and with the CSV cut from the same range.  An hour
-before dawn is where the disagreement shows: this clock belongs to the
-day it was worked, not to the one before it."
+  "Every step opens its periods at midnight, not at `org-extend-today-until'.
+That variable moves the start of a day for capture and for the agenda.  A
+matrix honouring it for some steps while others kept midnight would
+disagree with itself about which period a clock belongs to, and with the
+CSV cut from the same range.  Day, week and year are asserted separately
+because they are three separate branches: an hour before dawn on the
+first day of a period is the only place any of them shows.
+
+The sandbox holds the variable at zero, under which every branch is
+equivalent to every other, so each case raises it locally."
+  ;; Day: the clock belongs to the day it was worked, not the one before.
   (org-clock-projects-clockmatrix-test-with-data
       '((:tag "alpha" :file "alpha.org"))
       '(("alpha.org" . "\
@@ -60,6 +64,42 @@ CLOCK: [2026-05-02 Sat 01:00]--[2026-05-02 Sat 02:00] =>  1:00
                        hline
                        ("2026-05-01" "" "")
                        ("2026-05-02" "1:00" "1:00")
+                       hline
+                       ("Total" "1:00" "1:00"))))))
+  ;; Week: a Monday's small hours open that week, not close the one before.
+  (org-clock-projects-clockmatrix-test-with-data
+      '((:tag "alpha" :file "alpha.org"))
+      '(("alpha.org" . "\
+* TODO Before dawn :alpha:
+:LOGBOOK:
+CLOCK: [2026-05-04 Mon 01:00]--[2026-05-04 Mon 02:00] =>  1:00
+:END:
+"))
+    (let ((org-extend-today-until 3))
+      (should (equal (org-clock-projects-clockmatrix-test-table
+                      ":tstart \"2026-04-27\" :tend \"2026-05-11\" :step week")
+                     '(("Week" "alpha" "Total")
+                       hline
+                       ("2026-04-27" "" "")
+                       ("2026-05-04" "1:00" "1:00")
+                       hline
+                       ("Total" "1:00" "1:00"))))))
+  ;; Year: New Year's small hours belong to the year that just began.
+  (org-clock-projects-clockmatrix-test-with-data
+      '((:tag "alpha" :file "alpha.org"))
+      '(("alpha.org" . "\
+* TODO Before dawn :alpha:
+:LOGBOOK:
+CLOCK: [2026-01-01 Thu 01:00]--[2026-01-01 Thu 02:00] =>  1:00
+:END:
+"))
+    (let ((org-extend-today-until 3))
+      (should (equal (org-clock-projects-clockmatrix-test-table
+                      ":tstart \"2025-01-01\" :tend \"2027-01-01\" :step year")
+                     '(("Year" "alpha" "Total")
+                       hline
+                       ("2025" "" "")
+                       ("2026" "1:00" "1:00")
                        hline
                        ("Total" "1:00" "1:00")))))))
 

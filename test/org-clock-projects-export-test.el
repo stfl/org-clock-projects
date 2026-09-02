@@ -291,6 +291,20 @@ it accepts, since a completion list announces nothing about free text."
                    (org-clock-projects-export-test-tasks
                     org-clock-projects-export-test-name)))))
 
+(ert-deftest org-clock-projects-export-test-the-period-defaults-to-last-month ()
+  "Accepting the period prompt empty invoices the month just ended.
+Invoicing happens in the first days of a month for the month before it,
+which is the one selection worth having for free; taking the running
+month by default would name the file for a period nobody was invoicing."
+  (org-clock-projects-export-test-with-project
+      (org-clock-projects-export-test-boundary-contents)
+    ;; The empty answer is the minibuffer being accepted as it stands.
+    (org-clock-projects-test-with-prompts
+        (list org-clock-projects-export-test-project "")
+      (org-clock-projects-export))
+    (should (equal (org-clock-projects-export-test-exports)
+                   (list org-clock-projects-export-test-name)))))
+
 (ert-deftest org-clock-projects-export-test-a-quarter-names-its-file ()
   "A quarter is classified as one and named for it.
 Its bounds coincide with no month, so a quarter that failed to classify
@@ -675,6 +689,28 @@ overlap inside one project bills the same minutes twice."
         (list org-clock-projects-export-test-project "2026-08")
       (should-error (org-clock-projects-export) :type 'user-error))
     (should-not (org-clock-projects-export-test-exports))))
+
+(ert-deftest org-clock-projects-export-test-a-zero-length-entry-is-not-an-overlap ()
+  "An entry of no length inside another does not stop the export.
+The overlap check exists to stop the same minutes being billed twice, and
+an entry of no length holds none to bill.  Refusing here would refuse a
+whole period on account of a stray the export is expected to carry
+through as a zero-duration row."
+  (org-clock-projects-export-test-with-project
+      `(("corner-cafe.org"
+         . ,(org-clock-projects-export-test-tagged-file
+             "cafe"
+             (org-clock-projects-export-test-clocked
+              "Long pour" '(2026 8 5 9 0) '(2026 8 5 11 0))
+             (org-clock-projects-export-test-clocked
+              "Stray" '(2026 8 5 10 0) '(2026 8 5 10 0)))))
+    (org-clock-projects-test-with-prompts
+        (list org-clock-projects-export-test-project "2026-08")
+      (org-clock-projects-export))
+    (should (equal (org-clock-projects-export-test-spans
+                    org-clock-projects-export-test-name)
+                   '(("2026-08-05 09:00" "2026-08-05 11:00")
+                     ("2026-08-05 10:00" "2026-08-05 10:00"))))))
 
 (ert-deftest org-clock-projects-export-test-an-overlap-with-the-archive-stops-the-export ()
   "The overlap check spans the scanned files rather than each on its own.

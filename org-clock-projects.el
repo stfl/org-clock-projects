@@ -1475,10 +1475,16 @@ question never arises between projects.
 ENTRIES arrive oldest first, so an entry overlaps an earlier one exactly
 when it begins before the furthest end reached so far, and one pass finds
 every such pair.  The later entry is the one reported: it is the one
-whose start landed inside a stretch already accounted for."
+whose start landed inside a stretch already accounted for.
+
+An entry of no length covers no minutes, so it cannot bill any of them
+twice and is never reported, however it falls against its neighbours.
+Such an entry is a stray rather than a defect, and refusing to export a
+period that holds one would refuse the period rather than the stray."
   (let (findings furthest)
     (dolist (entry entries)
       (when (and furthest
+                 (> (org-clock-projects--entry-minutes entry) 0)
                  (string< (plist-get entry :start) (plist-get furthest :end)))
         (push (org-clock-projects--finding
                'overlap (plist-get entry :file) (plist-get entry :position)

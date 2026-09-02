@@ -350,9 +350,16 @@ for nothing at all."
          (org-clock-projects-test--prompted nil)
          (org-clock-projects-test--collection nil))
      (cl-letf (((symbol-function 'completing-read)
-                (lambda (prompt collection &rest _)
+                (lambda (prompt collection &optional _predicate _require-match
+                                _initial-input _hist def &rest _)
                   (setq org-clock-projects-test--collection collection)
-                  (org-clock-projects-test--prompt prompt)))
+                  (let ((answer (org-clock-projects-test--prompt prompt)))
+                    ;; Accepting the minibuffer empty is how a default is
+                    ;; taken, so a scripted empty answer is what makes the
+                    ;; default a prompt offers observable at all.
+                    (if (equal answer "")
+                        (if (consp def) (car def) def)
+                      answer))))
                ((symbol-function 'org-read-date)
                 #'org-clock-projects-test--read-date))
        (prog1 (progn ,@body)
