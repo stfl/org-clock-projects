@@ -13,16 +13,18 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Two released builds, both carried as such by nix-emacs-ci, which is
-        # where purcell/setup-emacs installs from, and both gating.  "29.4" is
-        # the newest of the 29 series the Eask floor names, and "31.1" the
-        # newest release, so the pair spans the supported range.
+        # Released builds carried as such by nix-emacs-ci, which is where
+        # purcell/setup-emacs installs from, every one of them gating.  "29.4"
+        # is the newest of the 29 series the Eask floor names and "31.1" the
+        # newest release, so the range is covered at both ends, with "30.2"
+        # between them.
         #
-        # They differ in whether warnings.el is preloaded, and the suite's
-        # warning capture is sensitive to that, so the second run is coverage
-        # rather than repetition: a test can pass on one and fail on the other.
+        # None of the three is repetition: they disagree about whether
+        # warnings.el is preloaded, and the suites' warning capture is
+        # sensitive to that, so a test can pass on one and fail on another.
         emacs-version:
           - "29.4"
+          - "30.2"
           - "31.1"
 
     steps:
