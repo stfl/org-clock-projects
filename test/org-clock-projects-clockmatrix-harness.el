@@ -96,7 +96,16 @@ where the matrix finds them is part of what is under test."
            (expand-file-name "archive/%s::datetree" sandbox))
           (org-clock-projects-projects-function
            #'org-clock-projects-clockmatrix-test-projects-function)
-          (org-clock-projects-clockmatrix-test-registry ,projects))
+          (org-clock-projects-clockmatrix-test-registry ,projects)
+          ;; A skipped registry entry warns once per entry and per registry.
+          ;; The bookkeeping that makes it once outlives the block that
+          ;; rendered, so unbound here one test's warning would be the reason
+          ;; the next test sees none.
+          (org-clock-projects--last-registry nil)
+          (org-clock-projects--warned-entries nil)
+          ;; The nil scope's remembered clock is session state like any
+          ;; other, and a matrix test has no reason to inherit one.
+          (org-clock-projects--unscoped-clock nil))
      (unwind-protect
          (progn
            (pcase-dolist (`(,name . ,content) ,files)

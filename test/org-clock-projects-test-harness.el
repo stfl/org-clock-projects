@@ -117,26 +117,85 @@ BODY never prompts for a completion."
   "Return the annotation the last stubbed completion gives CANDIDATE."
   (funcall (org-clock-projects-test-metadata 'annotation-function) candidate))
 
+;;;; Captured output
+;;
+;; The sandbox binds `inhibit-message', because a run that printed every
+;; message would bury the failures among them — which also puts the echo area
+;; out of reach of a test whose subject is what the user was told.  A warning
+;; is worse: displayed for real it opens a window over the test.  Both are
+;; captured into a list and read back in the order they were emitted.
+
+(defvar org-clock-projects-test--messages nil
+  "The messages captured inside `org-clock-projects-test-with-messages'.")
+
+(defmacro org-clock-projects-test-with-messages (&rest body)
+  "Run BODY capturing every message it emits.
+Read them back with `org-clock-projects-test-messages'."
+  (declare (indent 0) (debug t))
+  `(let ((org-clock-projects-test--messages nil))
+     (cl-letf (((symbol-function 'message)
+                (lambda (format &rest args)
+                  ;; `(message nil)' clears the echo area and says nothing, so
+                  ;; recording it would put an entry in the list for text no
+                  ;; reader ever saw.
+                  (when format
+                    (let ((text (apply #'format-message format args)))
+                      (push text org-clock-projects-test--messages)
+                      text)))))
+       ,@body)))
+
+(defun org-clock-projects-test-messages ()
+  "Return the captured messages, in the order they were emitted.
+The text is the one `format-message' produces, quote translation
+included, so an assertion reads what the echo area would have shown."
+  (reverse org-clock-projects-test--messages))
+
+(defvar org-clock-projects-test--warnings nil
+  "The warnings captured inside `org-clock-projects-test-with-warnings'.")
+
+(defmacro org-clock-projects-test-with-warnings (&rest body)
+  "Run BODY capturing the text of every warning it displays.
+Read them back with `org-clock-projects-test-warnings'."
+  (declare (indent 0) (debug t))
+  `(let ((org-clock-projects-test--warnings nil))
+     (cl-letf (((symbol-function 'display-warning)
+                (lambda (_type message &rest _)
+                  (push message org-clock-projects-test--warnings))))
+       ,@body)))
+
+(defun org-clock-projects-test-warnings ()
+  "Return the captured warnings, in the order they were displayed."
+  (reverse org-clock-projects-test--warnings))
+
 ;;;; Fixtures
 
-(defconst org-clock-projects-test-files '("alpha.org" "beta.org" "gamma.org")
-  "The files that may become projects in most tests.
-`todo.org' is deliberately absent, so it is a file belonging to no
-project even once every candidate has been created.")
+(defconst org-clock-projects-test-projects
+  '((:tag "atag" :name "Alpha Project" :file "alpha.org")
+    (:tag "btag" :name "Beta Project"  :file "beta.org")
+    (:tag "gtag" :name "Gamma Project" :file "gamma.org"))
+  "The projects most tests register.
+A project's tag, the name it is displayed under and the base of its file
+are three different strings, so a lookup keyed on the wrong one of the
+three cannot pass by coincidence.  `todo.org' belongs to none of them, so
+it stays a file no project owns however many of these are enrolled.")
 
-(defun org-clock-projects-test-entry (heading &optional minutes-ago)
+(defun org-clock-projects-test-entry (heading &optional minutes-ago tag)
   "Return an Org entry for HEADING.
-With MINUTES-AGO, the entry carries an open clock started then."
-  (concat "* TODO " heading "\n"
+With MINUTES-AGO, the entry carries an open clock started then.  With
+TAG, the headline carries that tag, which is how an entry is owned inside
+a file that declares no tag of its own."
+  (concat "* TODO " heading (if tag (format " :%s:" tag) "") "\n"
           (if minutes-ago
               (format ":LOGBOOK:\nCLOCK: %s\n:END:\n"
                       (org-clock-projects-test-stamp minutes-ago))
             "")))
 
-(defun org-clock-projects-test-clock-at (heading start)
-  "Return an Org entry for HEADING carrying an open clock started at START."
-  (format "* TODO %s\n:LOGBOOK:\nCLOCK: %s\n:END:\n"
+(defun org-clock-projects-test-clock-at (heading start &optional tag)
+  "Return an Org entry for HEADING carrying an open clock started at START.
+With TAG, the headline carries that tag."
+  (format "* TODO %s%s\n:LOGBOOK:\nCLOCK: %s\n:END:\n"
           heading
+          (if tag (format " :%s:" tag) "")
           (format-time-string (org-time-stamp-format 'with-time t) start)))
 
 (defun org-clock-projects-test--kill-buffers (dir)
@@ -165,12 +224,25 @@ With MINUTES-AGO, the entry carries an open clock started then."
   (declare (indent 0) (debug t))
   `(let* ((tmpdir (make-temp-file "org-clock-projects-test-" t))
           (org-directory tmpdir)
-          (org-clock-projects-files nil)
-          (org-clock-projects-files-function #'org-clock-projects-default-files)
+          (org-clock-projects-projects nil)
+          (org-clock-projects-projects-function
+           #'org-clock-projects-default-projects)
           (org-clock-projects-continue-threshold 30)
-          (org-clock-projects--projects nil)
+          (org-clock-projects--enrolled nil)
           (org-clock-projects--current nil)
           (org-clock-projects--unscoped-out-time nil)
+          ;; The remembered unscoped clock and the skip-once warning
+          ;; bookkeeping both outlive the command that set them, so a test
+          ;; leaving either behind answers the next test's question for it.
+          (org-clock-projects--unscoped-clock nil)
+          (org-clock-projects--last-registry nil)
+          (org-clock-projects--warned-entries nil)
+          ;; Ownership is defined under the reader's inheritance settings, so
+          ;; the sandbox states all three rather than letting the machine the
+          ;; suite runs on decide which entries a project owns.
+          (org-use-tag-inheritance t)
+          (org-tags-exclude-from-inheritance nil)
+          (org-agenda-use-tag-inheritance t)
           ;; Rounding is a property under test, so it is off unless a test
           ;; turns it on.
           (org-clock-rounding-minutes 0)
@@ -200,17 +272,66 @@ With MINUTES-AGO, the entry carries an open clock started then."
        (org-clock-projects-test--kill-buffers tmpdir)
        (delete-directory tmpdir t))))
 
-(defmacro org-clock-projects-test-with-data (files contents &rest body)
-  "Run BODY with FILES as project candidates and CONTENTS written out.
-FILES is a list of names for `org-clock-projects-files'.  CONTENTS is an
-alist of (NAME . TEXT); intermediate directories are created."
+(defun org-clock-projects-test--names-a-tag-p (text)
+  "Return non-nil when Org fixture TEXT names a tag of its own.
+A `#+FILETAGS:' line counts even when it lists nothing, and so does a
+tagged headline: writing either is how a fixture says it settles who owns
+its entries itself."
+  (string-match-p
+   "^\\(?:#\\+FILETAGS:\\|\\*+ .*[ \t]:[[:alnum:]_@#%:]+:[ \t]*$\\)" text))
+
+(defun org-clock-projects-test--file-tag (name)
+  "Return the tag of the first registered project keeping its time in NAME.
+NAME is relative to `org-directory', the way the fixture alist writes it.
+The registry is read through the package's own accessor, so a project
+that declares no `:file' is looked up under the file the package would
+give it rather than under a second copy of that default."
+  (let ((path (expand-file-name name org-directory)))
+    (seq-some (lambda (record)
+                (and (equal path (expand-file-name (plist-get record :file)
+                                                   org-directory))
+                     (plist-get record :tag)))
+              (org-clock-projects-project-records))))
+
+(defun org-clock-projects-test--fixture-text (name text)
+  "Return fixture TEXT as it is written to NAME.
+A file that some registered project declares as its `:file' is written
+with `#+FILETAGS: :TAG:' ahead of TEXT, TAG being that project's tag.  A
+TEXT that names a tag of its own anywhere — a `#+FILETAGS:' line, whether
+it lists tags or nothing, or a tagged headline — is written exactly as it
+stands.
+
+Ownership is the subject of most of these tests, and spelling a tag into
+every entry of every fixture alist would bury it, so a project's own file
+carries its project's tag for free.  Naming a tag is how a fixture takes
+the question back, and that is how a file two projects share, a project
+file that deliberately mentions no tag at all, and an entry inside a
+project's file that belongs to no project, are each written."
+  (let ((tag (and (not (org-clock-projects-test--names-a-tag-p text))
+                  (org-clock-projects-test--file-tag name))))
+    (if tag (format "#+FILETAGS: :%s:\n%s" tag text) text)))
+
+(defmacro org-clock-projects-test-with-data (projects contents &rest body)
+  "Run BODY with PROJECTS registered and CONTENTS written out.
+PROJECTS is a registry in the layout `org-clock-projects-projects'
+documents: one plist per project, each declaring at least a `:tag'.
+CONTENTS is an alist of (NAME . TEXT); intermediate directories are
+created, and a project's own file is tagged as
+`org-clock-projects-test--fixture-text' describes."
   (declare (indent 2) (debug t))
   `(org-clock-projects-test-with-sandbox
-     (setq org-clock-projects-files ,files)
+     (setq org-clock-projects-projects ,projects)
      (pcase-dolist (`(,name . ,text) ,contents)
        (let ((path (expand-file-name name org-directory)))
          (make-directory (file-name-directory path) t)
-         (with-temp-file path (insert text))))
+         (with-temp-file path
+           (insert (org-clock-projects-test--fixture-text name text)))))
+     ;; Reading the registry to tag the fixtures also spends the skip-once
+     ;; warnings on it, so the bookkeeping goes back to where the sandbox
+     ;; opened it: a test about a bad entry wants its own first read to be
+     ;; the read that warns.
+     (setq org-clock-projects--last-registry nil
+           org-clock-projects--warned-entries nil)
      ,@body))
 
 ;;;; The configuration this package absorbed
@@ -244,10 +365,15 @@ alist of (NAME . TEXT); intermediate directories are created."
   (find-file-noselect (expand-file-name file org-directory)))
 
 (defun org-clock-projects-test-goto (file heading)
-  "Make FILE current with point on HEADING."
+  "Make FILE current with point on HEADING.
+HEADING is the headline text alone: the todo keyword before it and the
+tags after it are matched but not named, so a test names an entry the
+same way whether its ownership is declared on the headline or on the
+file."
   (set-buffer (org-clock-projects-test-buffer file))
   (goto-char (point-min))
-  (re-search-forward (concat "^\\*+ +\\(?:[A-Z]+ +\\)?" (regexp-quote heading) "$"))
+  (re-search-forward (concat "^\\*+ +\\(?:[A-Z]+ +\\)?" (regexp-quote heading)
+                             "\\(?:[ \t]+:[[:alnum:]_@#%:]+:\\)?[ \t]*$"))
   (forward-line 0))
 
 (defun org-clock-projects-test-clock-in (file heading)
@@ -303,7 +429,10 @@ alist of (NAME . TEXT); intermediate directories are created."
       (org-get-heading t t t t))))
 
 (defun org-clock-projects-test-current ()
-  "Return the name of the current project, or nil."
+  "Return the display name of the project this session is scoped to, or nil.
+Unscoped work answers nil rather than
+`org-clock-projects-unscoped-name': the tests ask whether there is a
+current project at all as often as they ask which one it is."
   (and org-clock-projects--current
        (org-clock-projects-name org-clock-projects--current)))
 

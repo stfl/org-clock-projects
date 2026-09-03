@@ -6,9 +6,16 @@
 ;; leaves the report reading the same passes, and one that changes what the
 ;; reader is told fails.
 ;;
-;; A finding is picked out of the buffer by its button rather than by its
-;; line number, because a button is what the report promises one of per
-;; finding; the prose around them is the report talking about itself.
+;; A finding about a clock line is picked out of the buffer by its button
+;; rather than by its line number, because a button is what the report
+;; promises one of per such finding; the prose around them is the report
+;; talking about itself.
+;;
+;; A finding about the registry itself has no line to be taken to and carries
+;; no button, so the section holding those is read by position instead.  The
+;; two readers between them account for the whole report, which is what keeps
+;; a section from being rendered and never looked at: a registry line that did
+;; carry a button would turn up among the findings above.
 ;;
 ;; Story 28's jump is the one thing that text cannot show.  It is asserted by
 ;; taking the finding's own action and looking at where it lands.
@@ -28,10 +35,13 @@
   "The buffer the check renders into.")
 
 (defconst org-clock-projects-check-test-kind-names
-  '("open-clock" "overlap" "long-entry" "missing-tag")
-  "The four problems a finding can report.
+  '("open-clock" "overlap" "long-entry" "missing-tag" "unowned" "multi-tag"
+    "inheritance" "illegal-tag" "shared-file" "duplicate-name")
+  "Every problem a finding can report.
 Which of them a reader is looking at is the one thing every finding has
-to say, so it is what the assertions here read a finding by.")
+to say, so it is what the assertions here read a finding by.  No name
+holds another, which is what lets a line be read for its kind by
+searching it for each of them in turn.")
 
 (defun org-clock-projects-check-test-report ()
   "Return the text of the check report buffer, or nil when there is none."
@@ -41,11 +51,13 @@ to say, so it is what the assertions here read a finding by.")
            (buffer-substring-no-properties (point-min) (point-max))))))
 
 (defun org-clock-projects-check-test-findings ()
-  "Return one (LINE . BUTTON) cons per finding, in the order rendered.
-A finding is what the report made jumpable, so its button is what picks
-it out of the buffer.  Reading the findings off the buttons rather than
-off the line numbers leaves the report free to say whatever it likes
-around them: prose carries no button and is not a finding."
+  "Return one (LINE . BUTTON) cons per finding about a clock line.
+Those are what the report made jumpable, so a button is what picks one
+out of the buffer.  Reading them off the buttons rather than off the line
+numbers leaves the report free to say whatever it likes around them:
+prose carries no button and is not a finding, and neither is a line in
+the registry section, which
+`org-clock-projects-check-test-registry-findings' reads instead."
   (let ((buffer (get-buffer org-clock-projects-check-test-buffer)))
     (and buffer
          (with-current-buffer buffer
@@ -62,18 +74,21 @@ around them: prose carries no button and is not a finding."
                  (setq position (button-end button)))
                (nreverse findings)))))))
 
+(defun org-clock-projects-check-test-kind-of (line)
+  "Return the kind LINE names.
+A line naming no kind, or more than one, is itself a failure: the kind is
+what tells the reader which problem the line is about."
+  (let ((named (seq-filter
+                (lambda (kind) (string-match-p (regexp-quote kind) line))
+                org-clock-projects-check-test-kind-names)))
+    (unless (= 1 (length named))
+      (error "Finding names %d kinds: %s" (length named) line))
+    (car named)))
+
 (defun org-clock-projects-check-test-kinds ()
-  "Return the kind each finding names, in the order rendered.
-A finding naming no kind, or more than one, is itself a failure: the kind
-is what tells the reader which of the four problems the line is about."
+  "Return the kind each finding names, in the order rendered."
   (mapcar (lambda (finding)
-            (let ((named (seq-filter
-                          (lambda (kind)
-                            (string-match-p (regexp-quote kind) (car finding)))
-                          org-clock-projects-check-test-kind-names)))
-              (unless (= 1 (length named))
-                (error "Finding names %d kinds: %s" (length named) (car finding)))
-              (car named)))
+            (org-clock-projects-check-test-kind-of (car finding)))
           (org-clock-projects-check-test-findings)))
 
 (defun org-clock-projects-check-test-kind-set ()
@@ -114,6 +129,40 @@ is what the report actually guarantees."
   "Return the line point rests on in the current buffer."
   (buffer-substring-no-properties (line-beginning-position) (line-end-position)))
 
+(defconst org-clock-projects-check-test-registry-heading "^The registry: "
+  "How the report opens the section about the registry itself.")
+
+(defun org-clock-projects-check-test-registry-findings ()
+  "Return the plain lines of the report's registry section, in order rendered.
+A registry finding holds for whichever project and period were asked for,
+so it names no clock line and carries no button, and the button reader
+above cannot see one.  They are read by position under the section
+heading instead.  A report rendering no such heading is a failure rather
+than a report with nothing in the section: the heading is what a reader
+with a clean registry is told, and without it a diagnostic could be
+missing rather than absent."
+  (let ((buffer (get-buffer org-clock-projects-check-test-buffer)))
+    (and buffer
+         (with-current-buffer buffer
+           (save-excursion
+             (goto-char (point-min))
+             (unless (re-search-forward
+                      org-clock-projects-check-test-registry-heading nil t)
+               (error "The report renders no registry section"))
+             (forward-line 1)
+             (let (lines)
+               (while (not (eobp))
+                 (let ((line (buffer-substring-no-properties
+                              (line-beginning-position) (line-end-position))))
+                   (unless (string-empty-p line) (push line lines)))
+                 (forward-line 1))
+               (nreverse lines)))))))
+
+(defun org-clock-projects-check-test-registry-kinds ()
+  "Return the kind each registry finding names, in the order rendered."
+  (mapcar #'org-clock-projects-check-test-kind-of
+          (org-clock-projects-check-test-registry-findings)))
+
 ;;;; Fixtures
 
 (defconst org-clock-projects-check-test-cafe
@@ -125,7 +174,16 @@ no two of the three can be silently interchanged.")
 
 (defconst org-clock-projects-check-test-birds
   '(:tag "birds" :name "Bird Atlas" :file "bird-atlas.org")
-  "A second project, for the overlap that runs between two of them.")
+  "A second project, keeping its own time in its own file.
+It is the other party to anything that takes two projects: an overlap
+running between them, and an entry both of them claim.")
+
+(defconst org-clock-projects-check-test-lodger
+  '(:tag "birds" :name "Bird Atlas" :file "corner-cafe.org")
+  "The second project again, keeping its time in the first one's file.
+Two projects sharing a file is legal and the tag is what tells their work
+apart, so a registry holding this one has nothing wrong with it; the
+report says so out loud all the same.")
 
 (defconst org-clock-projects-check-test-archive "archive/corner-cafe.org_archive"
   "Where `org-archive-location' puts the archive of the first project's file.
@@ -164,25 +222,51 @@ the fixture rather than as arithmetic at the assertion."
 
 (defmacro org-clock-projects-check-test-with-projects (records contents &rest body)
   "Run BODY with RECORDS registered as the projects and CONTENTS on disk.
-RECORDS is a list of project plists and CONTENTS an alist of (NAME . TEXT)
-written under the sandbox's `org-directory'.  The clock is frozen at
-`org-clock-projects-check-test-now', archives resolve inside the sandbox,
-and the agenda is the sandbox directory alone, so a widened scan sees the
-fixture and nothing of the machine it runs on."
+RECORDS is a list of project plists, written the way
+`org-clock-projects-projects' documents them, and CONTENTS an alist of
+\(NAME . TEXT) written under the sandbox's `org-directory'.  The clock is
+frozen at `org-clock-projects-check-test-now', archives resolve inside
+the sandbox, and the agenda is the sandbox directory alone, so a widened
+scan sees the fixture and nothing of the machine it runs on.
+
+The registry is declared once, in the variable, so the resolver these
+tests read it through is the built-in one.  The three inheritance
+settings ownership is defined under are the sandbox's, and a test that
+wants a tag not to inherit binds one of them around its own call."
   (declare (indent 2) (debug t))
-  `(let ((registry ,records))
-     (org-clock-projects-test-with-data
-         (mapcar (lambda (record) (plist-get record :file)) registry)
-         ,contents
-       (setq org-clock-projects-projects-function (lambda () registry))
-       (let ((org-archive-location "archive/%s_archive::")
-             (org-agenda-files (list org-directory))
-             (org-use-tag-inheritance t))
-         (unwind-protect
-             (org-clock-projects-test-at (org-clock-projects-check-test-now)
-               ,@body)
-           (when (get-buffer org-clock-projects-check-test-buffer)
-             (kill-buffer org-clock-projects-check-test-buffer)))))))
+  `(org-clock-projects-test-with-data ,records ,contents
+     (let ((org-archive-location "archive/%s_archive::")
+           (org-agenda-files (list org-directory)))
+       (unwind-protect
+           (org-clock-projects-test-at (org-clock-projects-check-test-now)
+             ,@body)
+         (when (get-buffer org-clock-projects-check-test-buffer)
+           (kill-buffer org-clock-projects-check-test-buffer))))))
+
+(defun org-clock-projects-check-test-only-registry-finding (kind)
+  "Run the check over Corner Café for August and return its one KIND line.
+The registry tests each put a single fault in the registry and give the
+project a file holding no clock at all, so that one line is the whole
+report: a finding about a clock line, or a registry finding of another
+kind, is a failure here.  It is also what shows a registry finding
+carries no button, since one that did would be read as a finding above."
+  (org-clock-projects-test-with-prompts '("Corner Café" "2024-08")
+    (org-clock-projects-check))
+  (should-not (org-clock-projects-check-test-findings))
+  (should (equal (org-clock-projects-check-test-registry-kinds) (list kind)))
+  (car (org-clock-projects-check-test-registry-findings)))
+
+;;;; The names the kinds go by
+
+(ert-deftest org-clock-projects-check-test-every-kind-is-told-apart-by-its-name ()
+  "No kind name holds another, so a line names exactly one of them.
+A finding's kind is read out of its line by searching the line for each
+name in turn.  A kind whose name sat inside another's would make every
+line naming the longer one name two kinds, and the reader raises on
+that — failing assertions that have nothing to do with the new kind."
+  (dolist (kind org-clock-projects-check-test-kind-names)
+    (should (equal (org-clock-projects-check-test-kind-of kind) kind))))
+
 
 ;;;; A period with nothing wrong in it
 
@@ -199,6 +283,10 @@ fixture and nothing of the machine it runs on."
     (org-clock-projects-test-with-prompts '("Corner Café" "2024-08")
       (org-clock-projects-check)
       (should-not (org-clock-projects-check-test-findings))
+      ;; Both sections are rendered on every run, the registry's included:
+      ;; a section that appeared only when it had something in it would let
+      ;; an unwired diagnostic read as a clean registry.
+      (should-not (org-clock-projects-check-test-registry-findings))
       (should (org-string-nw-p (org-clock-projects-check-test-report))))))
 
 ;;;; The prompts
@@ -491,14 +579,187 @@ was read rather than skipped."
       (org-clock-projects-check)
       (should-not (org-clock-projects-check-test-findings)))))
 
-;;;; Everything at once
+;;;; Ownership
 
-(ert-deftest org-clock-projects-check-test-all-four-kinds-render-together ()
-  "One command reporting everything questionable is the point of the check.
-The four are found in one pass over one project, so a report that can
-only render one kind at a time fails here rather than in use."
+(ert-deftest org-clock-projects-check-test-clocked-time-at-an-unowned-entry-is-reported ()
+  "Time in the project's own file that no project owns drifts out of the invoice.
+An entry inside a file that declares the tag goes unowned in exactly one
+arrangement: the tag reaches the file and stops there.  The file is
+tagged, so this is not the untagged-file fault the report already covers,
+and the two lines together name both the drift and the setting behind it.
+
+Clocked time is what is at stake, so the question is asked of the period
+being invoiced and of no other."
   (org-clock-projects-check-test-with-projects
       (list org-clock-projects-check-test-cafe)
+      `(("corner-cafe.org"
+         . ,(org-clock-projects-check-test-tagged
+             "cafe"
+             (org-clock-projects-test-closed-entry
+              "Drift"
+              (org-clock-projects-check-test-hours 8 6 9 3)))))
+    (let ((org-tags-exclude-from-inheritance '("cafe")))
+      (org-clock-projects-test-with-prompts '("Corner Café" "2024-08")
+        (org-clock-projects-check)
+        (should (equal (org-clock-projects-check-test-kinds) '("unowned")))
+        (should (string-match-p
+                 "Drift" (org-clock-projects-check-test-says "unowned")))
+        (should (equal (org-clock-projects-check-test-registry-kinds)
+                       '("inheritance"))))
+      (org-clock-projects-test-with-prompts '("Corner Café" "2024-09")
+        (org-clock-projects-check)
+        (should-not (org-clock-projects-check-test-findings))))))
+
+(ert-deftest org-clock-projects-check-test-an-entry-answering-to-two-projects-is-reported ()
+  "An entry two projects claim is billed to whichever of them is asked first.
+Ownership is settled in registry order and every consumer agrees, so the
+entry is counted once and the totals stay additive — but which of the two
+gets the time is a decision the registry made silently, and the reader is
+the one who can tell whether it was the intended one.
+
+Ambiguity is a property of the registry and the file rather than of a
+month, so the entry is named whether or not the period being checked
+holds any of its time.  An entry first billed in September is worth
+knowing about in August, when the tag is still cheap to fix."
+  (org-clock-projects-check-test-with-projects
+      (list org-clock-projects-check-test-cafe
+            org-clock-projects-check-test-birds)
+      `(("corner-cafe.org"
+         . ,(org-clock-projects-check-test-tagged
+             "cafe"
+             (concat "* TODO Both :birds:\n:LOGBOOK:\n"
+                     (org-clock-projects-test-clock-line
+                      (org-clock-projects-test-time-at 2024 9 7 9)
+                      (org-clock-projects-test-time-at 2024 9 7 11))
+                     ":END:\n"))))
+    (org-clock-projects-test-with-prompts '("Corner Café" "2024-08")
+      (org-clock-projects-check)
+      (should (equal (org-clock-projects-check-test-kinds) '("multi-tag")))
+      (should (string-match-p
+               "Bird Atlas" (org-clock-projects-check-test-says "multi-tag")))
+      (should-not (org-clock-projects-check-test-registry-findings)))
+    (org-clock-projects-test-with-prompts '("Corner Café" "2024-09")
+      (org-clock-projects-check)
+      (should (equal (org-clock-projects-check-test-kinds) '("multi-tag"))))))
+
+
+;;;; The registry itself
+
+(ert-deftest org-clock-projects-check-test-a-tag-that-does-not-inherit-is-reported ()
+  "A tag worn by the file and by nothing under it selects almost nothing.
+The project then reads as having barely worked all month, with the file's
+own clocks selected and every entry's left behind.  Org is asked whether
+the tag survives rather than the setting being reimplemented, so the
+plain, list and regexp forms of it each have to answer."
+  (org-clock-projects-check-test-with-projects
+      (list org-clock-projects-check-test-cafe)
+      `(("corner-cafe.org" . ,(org-clock-projects-check-test-tagged "cafe")))
+    (let ((org-use-tag-inheritance nil))
+      (should (string-match-p
+               "org-use-tag-inheritance"
+               (org-clock-projects-check-test-only-registry-finding
+                "inheritance"))))
+    (let ((org-use-tag-inheritance '("other")))
+      (should (string-match-p
+               "org-use-tag-inheritance"
+               (org-clock-projects-check-test-only-registry-finding
+                "inheritance"))))
+    (let ((org-use-tag-inheritance "\\`other\\'"))
+      (should (string-match-p
+               "org-use-tag-inheritance"
+               (org-clock-projects-check-test-only-registry-finding
+                "inheritance"))))))
+
+(ert-deftest org-clock-projects-check-test-a-tag-excluded-from-inheritance-is-reported ()
+  "The exclusion list stops a tag that `org-use-tag-inheritance' passes.
+It is the setting most likely to name a project tag by accident — it is
+where the tags one does not want repeated down a tree are listed — and a
+reader looking only at `org-use-tag-inheritance' would call the
+configuration healthy."
+  (org-clock-projects-check-test-with-projects
+      (list org-clock-projects-check-test-cafe)
+      `(("corner-cafe.org" . ,(org-clock-projects-check-test-tagged "cafe")))
+    (let ((org-tags-exclude-from-inheritance '("cafe")))
+      (should (string-match-p
+               "org-tags-exclude-from-inheritance"
+               (org-clock-projects-check-test-only-registry-finding
+                "inheritance"))))))
+
+(ert-deftest org-clock-projects-check-test-a-tag-the-agenda-hides-is-reported ()
+  "Agenda inheritance never touches what is billed, which is why it is worth saying.
+The time is selected and invoiced correctly while the agenda shows the
+entries untagged, so the reader sees a project that looks empty in the
+one place they look at it every day and is quietly right everywhere
+else."
+  (org-clock-projects-check-test-with-projects
+      (list org-clock-projects-check-test-cafe)
+      `(("corner-cafe.org" . ,(org-clock-projects-check-test-tagged "cafe")))
+    (let ((org-agenda-use-tag-inheritance '(agenda)))
+      (should (string-match-p
+               "org-agenda-use-tag-inheritance"
+               (org-clock-projects-check-test-only-registry-finding
+                "inheritance"))))))
+
+(ert-deftest org-clock-projects-check-test-a-tag-org-cannot-spell-is-reported ()
+  "A tag Org would not accept is read as a tag expression and selects nothing.
+The project exports an empty CSV and the check finds nothing wrong with
+its files, because a hyphen makes `corner-cafe' ask for cafe and not cafe.
+Nothing else in the report can say so: every other diagnostic is about
+work the tag found."
+  (org-clock-projects-check-test-with-projects
+      '((:tag "corner-cafe" :name "Corner Café" :file "corner-cafe.org"))
+      `(("corner-cafe.org" . ,(org-clock-projects-check-test-tagged "corner-cafe")))
+    (should (string-match-p
+             "corner-cafe"
+             (org-clock-projects-check-test-only-registry-finding
+              "illegal-tag")))))
+
+(ert-deftest org-clock-projects-check-test-two-projects-sharing-a-file-are-reported ()
+  "Two projects in one file is the arrangement tag identity exists to allow.
+It is reported for information alone, which is what the two counts make
+visible: the project's own period is clean and the registry still has
+something to say about it."
+  (org-clock-projects-check-test-with-projects
+      (list org-clock-projects-check-test-cafe
+            org-clock-projects-check-test-lodger)
+      `(("corner-cafe.org" . ,(org-clock-projects-check-test-tagged "cafe")))
+    (should (string-match-p
+             "Bird Atlas"
+             (org-clock-projects-check-test-only-registry-finding
+              "shared-file")))
+    (should (string-match-p
+             "Corner Café over 2024-08: nothing to look at"
+             (org-clock-projects-check-test-report)))
+    (should (string-match-p
+             "The registry: 1 to look at"
+             (org-clock-projects-check-test-report)))))
+
+(ert-deftest org-clock-projects-check-test-two-projects-sharing-a-name-are-reported ()
+  "Two projects called the same thing leave one of them unreachable.
+The export and check prompts offer projects by name and take the first
+answering to one, so the second can be invoiced from neither command
+however correctly it is declared."
+  (org-clock-projects-check-test-with-projects
+      (list org-clock-projects-check-test-cafe
+            '(:tag "birds" :name "Corner Café" :file "bird-atlas.org"))
+      `(("corner-cafe.org" . ,(org-clock-projects-check-test-tagged "cafe")))
+    (should (string-match-p
+             "birds"
+             (org-clock-projects-check-test-only-registry-finding
+              "duplicate-name")))))
+
+
+;;;; Everything at once
+
+(ert-deftest org-clock-projects-check-test-every-kind-renders-together ()
+  "One command reporting everything questionable is the point of the check.
+They are found in one pass over one project, so a report that can only
+render one kind at a time fails here rather than in use, and so does one
+that can render the clock lines' findings or the registry's but not both
+in the same run."
+  (org-clock-projects-check-test-with-projects
+      (list org-clock-projects-check-test-cafe
+            org-clock-projects-check-test-lodger)
       `(("corner-cafe.org"
          . ,(org-clock-projects-check-test-tagged
              "cafe"
@@ -511,6 +772,11 @@ only render one kind at a time fails here rather than in use."
              (org-clock-projects-test-closed-entry
               "Forgot to clock out"
               (org-clock-projects-check-test-hours 8 5 8 11))
+             (concat "* TODO Both :birds:\n:LOGBOOK:\n"
+                     (org-clock-projects-test-clock-line
+                      (org-clock-projects-test-time-at 2024 8 7 9)
+                      (org-clock-projects-test-time-at 2024 8 7 11))
+                     ":END:\n")
              (org-clock-projects-test-clock-at
               "Still running"
               (org-clock-projects-test-time-at 2024 8 10 9))))
@@ -519,9 +785,12 @@ only render one kind at a time fails here rather than in use."
     (org-clock-projects-test-with-prompts '("Corner Café" "2024-08")
       (org-clock-projects-check)
       (should (equal (org-clock-projects-check-test-kind-set)
-                     '("long-entry" "missing-tag" "open-clock" "overlap")))
-      ;; One line per finding: four problems crowded onto one line would
-      ;; leave three of them with nowhere to hang their own jump.
+                     '("long-entry" "missing-tag" "multi-tag" "open-clock"
+                       "overlap")))
+      (should (equal (org-clock-projects-check-test-registry-kinds)
+                     '("shared-file")))
+      ;; One line per finding: two problems crowded onto one line would
+      ;; leave one of them with nowhere to hang its own jump.
       (let ((rows (org-clock-projects-check-test-rows)))
         (should (equal rows (delete-dups (copy-sequence rows))))))))
 
@@ -686,6 +955,43 @@ has to survive exactly the data that stopped it."
     (let ((org-clock-projects-export-directory org-directory))
       (org-clock-projects-test-with-prompts '("Corner Café" "2024-08")
         (should-error (org-clock-projects-export) :type 'user-error)))))
+
+(ert-deftest org-clock-projects-check-test-the-ownership-kinds-do-not-stop-the-export ()
+  "The export refuses on the two kinds that corrupt an invoice by themselves.
+Drifted and doubly-claimed time do not: the rows the CSV carries are
+correct either way, and refusing to write them would hold a month's
+invoice over an arrangement that may be exactly the intended one.  The
+report is where those are said, and the report is not a gate.
+
+The row is what shows the export ran to the end rather than merely
+declining to raise."
+  (org-clock-projects-check-test-with-projects
+      (list org-clock-projects-check-test-cafe
+            org-clock-projects-check-test-birds)
+      `(("corner-cafe.org"
+         . ,(org-clock-projects-check-test-tagged
+             "cafe"
+             (org-clock-projects-test-closed-entry
+              "Drift"
+              (org-clock-projects-check-test-hours 8 6 9 3))
+             (concat "* TODO Both :cafe:birds:\n:LOGBOOK:\n"
+                     (org-clock-projects-test-clock-line
+                      (org-clock-projects-test-time-at 2024 8 7 9)
+                      (org-clock-projects-test-time-at 2024 8 7 11))
+                     ":END:\n"))))
+    (let ((org-tags-exclude-from-inheritance '("cafe")))
+      (org-clock-projects-test-with-prompts '("Corner Café" "2024-08")
+        (org-clock-projects-check)
+        (should (equal (org-clock-projects-check-test-kind-set)
+                       '("multi-tag" "unowned"))))
+      (let ((org-clock-projects-export-directory org-directory))
+        (org-clock-projects-test-with-prompts '("Corner Café" "2024-08")
+          (org-clock-projects-export))
+        (should (equal (length (org-clock-projects-test-csv-rows
+                                (expand-file-name
+                                 "2024-08-org-clock-corner-cafe.csv"
+                                 org-directory)))
+                       1))))))
 
 (provide 'org-clock-projects-check-test)
 ;;; org-clock-projects-check-test.el ends here

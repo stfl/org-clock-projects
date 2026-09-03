@@ -3,13 +3,20 @@
 ;; The export command is one seam and it covers the whole exporter.  Period
 ;; resolution, key interning, kind classification, midnight normalisation, the
 ;; inclusive end day, the archive-derived file set, both scan scopes, the
-;; period and tag gates, whole-entry output, sorting, the header, every
-;; filename form, the empty result, both raising checks and each prefix level
-;; are all visible in the file that lands on disk, in the prompts the flow
-;; raised, or in the error it signalled.  Nothing beneath the command is
+;; period and tag gates, ownership in registry order, the entries the registry
+;; skips, whole-entry output, sorting, the header, every filename form, the
+;; empty result, both raising checks and each prefix level are all visible in
+;; the file that lands on disk, in the prompts the flow raised, in the warnings
+;; it displayed, or in the error it signalled.  Nothing beneath the command is
 ;; reached for: no private helper is called and no internal data structure is
 ;; inspected.  A test that would still pass after the internals were rewritten,
 ;; and fail if the user-visible behaviour changed, is the target.
+;;
+;; The one seam here that is not a command is
+;; `org-clock-projects-project-records', and it carries this package's half of
+;; the registry contract shared with `agile-gtd'.  A record's `:file' is
+;; otherwise unobservable: the export names its output after the base of it,
+;; so `acme.org' and `clients/acme.org' would be indistinguishable there.
 
 ;;; Code:
 
@@ -52,6 +59,34 @@ that do not belong.")
   "2026-08-org-clock-corner-cafe.csv"
   "The file an August export of that project lands in.")
 
+(defconst org-clock-projects-export-test-contract-registry
+  '((:tag "solo")
+    (:tag "acme" :name "Acme Ltd")
+    (:tag "cafe" :file "corner-cafe.org")
+    (:tag "sub" :file "clients/sub.org")
+    (:tag "keyed" :name "Keyed Ltd" :key ?k))
+  "The declared half of the registry layout both packages read.
+One row per way a project can be written down: a tag on its own, a tag
+with the name it is called by, a tag with the file its time is kept in, a
+file naming a directory below the org directory, and an entry carrying
+`:key', which belongs to `agile-gtd' and means nothing here.
+
+The same rows appear in `agile-gtd''s suite, in
+test/agile-gtd-startup-test.el of the agile-gtd repository, where the
+normalised half additionally carries `:key'.  Nothing mechanically keeps
+the two copies equal: they are the shared layout's only guarantee, so a
+change to either belongs in both.")
+
+(defconst org-clock-projects-export-test-contract-records
+  '((:tag "solo" :name "solo" :file "solo.org")
+    (:tag "acme" :name "Acme Ltd" :file "acme.org")
+    (:tag "cafe" :name "cafe" :file "corner-cafe.org")
+    (:tag "sub" :name "sub" :file "clients/sub.org")
+    (:tag "keyed" :name "Keyed Ltd" :file "keyed.org"))
+  "What `org-clock-projects-export-test-contract-registry' normalises to.
+A name defaults to the tag and a file to `<tag>.org'; a declared file is
+kept exactly as written, relative names included, and `:key' is gone.")
+
 (defun org-clock-projects-export-test-tagged-file (tag &rest entries)
   "Return the text of an Org file carrying file-level TAG and holding ENTRIES.
 The tag is a `#+FILETAGS:' keyword rather than a headline tag because
@@ -60,11 +95,14 @@ requires inheritance to reach the file level."
   (concat (if tag (format "#+FILETAGS: :%s:\n" tag) "")
           (apply #'concat entries)))
 
-(defun org-clock-projects-export-test-clocked (heading start end)
+(defun org-clock-projects-export-test-clocked (heading start end &optional tags)
   "Return an Org entry for HEADING carrying one closed clock from START to END.
-START and END are (YEAR MONTH DAY HOUR MINUTE) lists."
+START and END are (YEAR MONTH DAY HOUR MINUTE) lists.  TAGS is written on
+the headline itself, colon-separated the way Org writes a tag list, which
+is how an entry is owned inside a file that declares no tag of its own
+and the only way one entry can carry two projects' tags."
   (org-clock-projects-test-closed-entry
-   heading
+   (concat heading (if tags (format " :%s:" tags) ""))
    (cons (apply #'org-clock-projects-test-time-at start)
          (apply #'org-clock-projects-test-time-at end))))
 
@@ -75,19 +113,22 @@ START is a (YEAR MONTH DAY HOUR MINUTE) list."
    heading (apply #'org-clock-projects-test-time-at start)))
 
 (defmacro org-clock-projects-export-test-with-registry (registry contents &rest body)
-  "Run BODY over CONTENTS with REGISTRY as the projects the resolver returns.
+  "Run BODY over CONTENTS with REGISTRY as the registered projects.
+REGISTRY is the declaration itself, so the projects the export offers and
+the projects CONTENTS is written against are one list rather than two
+that can drift.
+
 The clock is frozen, because a relative period and the date picker are
-both read off it.  `org-archive-location' points at a directory the
-retired exporter's hardcoded `archive/<name>' layout would never look in,
-so an archived entry can only be found by resolving the setting.
+both read off it.  `org-archive-location' points at a directory no
+hardcoded `archive/<name>' layout would ever look in, so an archived
+entry can only be found by resolving the setting.
 `org-extend-today-until' is deliberately non-zero: a billing period is a
 calendar-day concept, and a period resolved without binding it away would
 sit three hours off every boundary asserted here.  The export directory
 does not exist, so the first export has to create it."
   (declare (indent 2) (debug t))
-  `(org-clock-projects-test-with-data nil ,contents
-     (let ((org-clock-projects-projects-function (lambda () ,registry))
-           (org-clock-projects-export-directory
+  `(org-clock-projects-test-with-data ,registry ,contents
+     (let ((org-clock-projects-export-directory
             (expand-file-name "exports" org-directory))
            (org-clock-projects-export-file-function
             #'org-clock-projects-export-default-file-name)
@@ -203,6 +244,62 @@ and how far the scan reached."
          (org-clock-projects-export-test-clocked
           "Filed elsewhere" '(2026 8 12 9 0) '(2026 8 12 10 0))))))
 
+(defun org-clock-projects-export-test-contract-contents ()
+  "Return one file per contract row, each holding one August entry.
+Every file sits at the path its row's normalised `:file' names and
+carries that row's tag alone, so a project whose file resolved elsewhere
+finds nothing to export and a project selecting on the wrong tag comes
+back with somebody else's work."
+  (mapcar (lambda (record)
+            (cons (plist-get record :file)
+                  (org-clock-projects-export-test-tagged-file
+                   (plist-get record :tag)
+                   (org-clock-projects-export-test-clocked
+                    (format "%s work" (plist-get record :tag))
+                    '(2026 8 5 9 0) '(2026 8 5 10 0)))))
+          org-clock-projects-export-test-contract-records))
+
+(defun org-clock-projects-export-test-keyed-export (entry)
+  "Export the sole project ENTRY declares, and return everything it left.
+That is the names in the export directory and the tasks of the file the
+default naming gives an August export, which between them cover the name
+the prompt took, the file that landed and the rows the tag selected."
+  (org-clock-projects-export-test-with-registry (list entry)
+      `(("keyed.org"
+         . ,(org-clock-projects-export-test-tagged-file
+             "keyed"
+             (org-clock-projects-export-test-clocked
+              "Keyed work" '(2026 8 5 9 0) '(2026 8 5 10 0)))))
+    (org-clock-projects-test-with-prompts '("Keyed Ltd" "2026-08")
+      (org-clock-projects-export))
+    (list (org-clock-projects-export-test-exports)
+          (org-clock-projects-export-test-tasks
+           "2026-08-org-clock-keyed.csv"))))
+
+(defun org-clock-projects-export-test-ownership-contents ()
+  "Return contents in which one entry carries both registered projects' tags.
+Each project keeps an entry in its own file, and a third file no project
+declares holds one entry tagged for both and one tagged for the second
+alone.  Every entry is therefore claimed by exactly one project, so the
+two exports together account for the work once."
+  `(("corner-cafe.org"
+     . ,(org-clock-projects-export-test-tagged-file
+         "cafe"
+         (org-clock-projects-export-test-clocked
+          "House blend" '(2026 8 5 9 0) '(2026 8 5 10 0))))
+    ("acme.org"
+     . ,(org-clock-projects-export-test-tagged-file
+         "acme"
+         (org-clock-projects-export-test-clocked
+          "Acme review" '(2026 8 6 9 0) '(2026 8 6 10 0))))
+    ("shared.org"
+     . ,(org-clock-projects-export-test-tagged-file
+         nil
+         (org-clock-projects-export-test-clocked
+          "Both projects" '(2026 8 7 9 0) '(2026 8 7 10 0) "cafe:acme")
+         (org-clock-projects-export-test-clocked
+          "Acme only" '(2026 8 8 9 0) '(2026 8 8 10 0) "acme")))))
+
 (defun org-clock-projects-export-test-scope-contents ()
   "Return contents where the narrow and the wide scan differ.
 The project's own file, a second file carrying the project's tag, and a
@@ -245,26 +342,110 @@ would have to be answered instead had the prompt been built from them."
                    (org-clock-projects-export-test-tasks
                     org-clock-projects-export-test-name)))))
 
-(ert-deftest org-clock-projects-export-test-a-files-returning-resolver-still-exports ()
-  "A resolver handing back bare file names keeps working.
-Such a record has no tag, so there is nothing to gate on and every entry
-in the period is exported, tagged or not.  Its display name and its file
-base are both the file's base name, which is the only identifier a bare
-file name can supply."
+(ert-deftest org-clock-projects-export-test-an-entry-without-a-tag-is-never-offered ()
+  "An entry declaring no tag is skipped with a warning and never a candidate.
+The tag is the identity, so an entry without one names nothing that could
+be selected or exported; offering it would put a candidate in the prompt
+that answering breaks.  A registry holding nothing else therefore has no
+candidates at all and the flow stops before its first question, and the
+same two entries beside a working project cost only themselves.
+
+Each offender warns exactly once although the flow reads the registry
+several times over, and the warning prints the entry as it was written
+beside the plist that would have been accepted — which is what a registry
+still written as a list of file names needs in order to explain its own
+migration."
   (org-clock-projects-export-test-with-registry
-      '("solo.org")
-      `(("solo.org"
-         . ,(org-clock-projects-export-test-tagged-file
-             nil
-             (org-clock-projects-export-test-clocked
-              "Untagged work" '(2026 8 4 9 0) '(2026 8 4 10 0)))))
-    (org-clock-projects-test-with-prompts '("solo" "2026-08")
-      (org-clock-projects-export))
-    (should (equal '("2026-08-org-clock-solo.csv")
+      '("solo.org" (:name "Ghost" :file "ghost.org")) nil
+    (org-clock-projects-test-with-warnings
+      (org-clock-projects-test-with-prompts nil
+        (should-error (org-clock-projects-export) :type 'user-error))
+      (let ((warnings (org-clock-projects-test-warnings)))
+        (should (equal 2 (length warnings)))
+        (should (string-match-p (regexp-quote "\"solo.org\"") (nth 0 warnings)))
+        (should (string-match-p
+                 (regexp-quote "(:name \"Ghost\" :file \"ghost.org\")")
+                 (nth 1 warnings)))
+        (dolist (warning warnings)
+          (should (string-match-p
+                   (regexp-quote
+                    "(:tag \"acme\" :name \"Acme Ltd\" :file \"acme.org\")")
+                   warning)))))
+    (should-not (org-clock-projects-export-test-exports)))
+  (org-clock-projects-export-test-with-registry
+      `("solo.org"
+        ,@org-clock-projects-export-test-registry
+        (:name "Ghost" :file "ghost.org"))
+      (org-clock-projects-export-test-scope-contents)
+    (org-clock-projects-test-with-warnings
+      (org-clock-projects-test-with-prompts
+          (list org-clock-projects-export-test-project "2026-08")
+        (org-clock-projects-export))
+      (should (equal 2 (length (org-clock-projects-test-warnings)))))
+    (should (equal (list org-clock-projects-export-test-name)
                    (org-clock-projects-export-test-exports)))
-    (should (equal '("Untagged work")
+    (should (equal '("House blend")
                    (org-clock-projects-export-test-tasks
-                    "2026-08-org-clock-solo.csv")))))
+                    org-clock-projects-export-test-name)))))
+
+
+;;;; The registry layout both packages read
+
+(ert-deftest org-clock-projects-export-test-the-registry-normalises-as-declared ()
+  "Every way of declaring a project normalises to the documented record.
+This is the clock package's half of the contract `agile-gtd' holds the
+other half of, and the accessor is where `:file' is legible at all: the
+export names its output after the base of the file, so a `:file' expanded
+somewhere unintended, or defaulted where it was declared, would still
+produce the same name.  `:key' is `agile-gtd''s and is gone from the
+record here, and it costs no warning: an unknown key is tolerated on
+input, not skipped."
+  (org-clock-projects-export-test-with-registry
+      org-clock-projects-export-test-contract-registry nil
+    (org-clock-projects-test-with-warnings
+      (should (equal org-clock-projects-export-test-contract-records
+                     (org-clock-projects-project-records)))
+      (should-not (org-clock-projects-test-warnings)))))
+
+(ert-deftest org-clock-projects-export-test-each-declared-project-exports-under-its-record ()
+  "Each contract row exports under the record it normalises to.
+The name answers the project prompt, the file base names the CSV, and the
+tag decides its rows.  Both scans are asked for: the narrow one reads the
+path the record's `:file' resolves to and comes back empty if it resolves
+anywhere else, and the wide one reads every project's file at once and
+comes back with somebody else's work if the tag is not what selects."
+  (org-clock-projects-export-test-with-registry
+      org-clock-projects-export-test-contract-registry
+      (org-clock-projects-export-test-contract-contents)
+    (apply #'org-clock-projects-export-test-agenda
+           (mapcar (lambda (record) (plist-get record :file))
+                   org-clock-projects-export-test-contract-records))
+    (dolist (record org-clock-projects-export-test-contract-records)
+      (let ((name (plist-get record :name))
+            (csv (format "2026-08-org-clock-%s.csv"
+                         (file-name-base (plist-get record :file))))
+            (task (format "%s work" (plist-get record :tag))))
+        (dolist (scan '(nil (4)))
+          (ert-info ((format "project=%s scan=%S" name scan))
+            (org-clock-projects-test-with-prompts (list name "2026-08")
+              (org-clock-projects-export scan))
+            (should (member csv (org-clock-projects-export-test-exports)))
+            (should (equal (list task)
+                           (org-clock-projects-export-test-tasks csv)))))))))
+
+(ert-deftest org-clock-projects-export-test-an-unknown-key-changes-nothing ()
+  "A project carrying `:key' exports exactly as the same project without it.
+That the record drops the key is asserted at the accessor; that carrying
+it costs nothing is this: the two declarations agree on the name the
+prompt takes, on the file that lands and on the rows it holds.  The
+expected values are stated too, so that two flows failing the same way
+cannot pass as agreement."
+  (let ((keyed (org-clock-projects-export-test-keyed-export
+                '(:tag "keyed" :name "Keyed Ltd" :key ?k))))
+    (should (equal '(("2026-08-org-clock-keyed.csv") ("Keyed work")) keyed))
+    (should (equal keyed
+                   (org-clock-projects-export-test-keyed-export
+                    '(:tag "keyed" :name "Keyed Ltd"))))))
 
 
 ;;;; Choosing a period
@@ -522,6 +703,33 @@ file would turn a quiet month into a broken build."
     (should-not (org-clock-projects-test-csv-rows
                  (org-clock-projects-export-test-path
                   org-clock-projects-export-test-name)))))
+
+
+;;;; Which entries a project owns
+
+(ert-deftest org-clock-projects-export-test-a-wide-export-holds-only-the-projects-own-rows ()
+  "A wide export carries the project's own work and no other project's.
+The scan reaches every agenda file, so both projects' entries and an
+entry carrying both their tags pass under it, and the tag is the only
+thing keeping a client's CSV to that client's work.  The doubly tagged
+entry goes to the first project in registry order and to that one alone,
+so the two exports read together account for every entry exactly once —
+which is what makes the invoices add up."
+  (org-clock-projects-export-test-with-project
+      (org-clock-projects-export-test-ownership-contents)
+    (org-clock-projects-export-test-agenda
+     "corner-cafe.org" "acme.org" "shared.org")
+    (org-clock-projects-test-with-prompts
+        (list org-clock-projects-export-test-project "2026-08")
+      (org-clock-projects-export '(4)))
+    (should (equal '("House blend" "Both projects")
+                   (org-clock-projects-export-test-tasks
+                    org-clock-projects-export-test-name)))
+    (org-clock-projects-test-with-prompts '("Acme Ltd" "2026-08")
+      (org-clock-projects-export '(4)))
+    (should (equal '("Acme review" "Acme only")
+                   (org-clock-projects-export-test-tasks
+                    "2026-08-org-clock-acme.csv")))))
 
 
 ;;;; Which files are scanned

@@ -23,7 +23,10 @@
 ;;; Matrix shape and cell attribution
 
 (ert-deftest org-clock-projects-clockmatrix-renders-periods-against-projects ()
-  "Periods are rows, projects are columns, with totals on both axes."
+  "Periods are rows, projects are columns, with totals on both axes.
+A column is headed by its project's tag and not by the `:name' it
+declares, so that a heading can be pasted straight into a clocktable
+`:match' when a cell is being reconciled."
   (org-clock-projects-clockmatrix-test-with-data
       org-clock-projects-clockmatrix-test-projects
       org-clock-projects-clockmatrix-test-files
@@ -173,6 +176,185 @@ CLOCK: [2026-01-01 Thu 01:00]--[2026-01-01 Thu 02:00] =>  1:00
                      ("2026-05" "1:45" "1:45")
                      hline
                      ("Total" "1:45" "1:45"))))))
+
+;;; The tag gate
+
+(ert-deftest org-clock-projects-clockmatrix-gates-each-column-by-its-own-tag ()
+  "A cell sums the entries carrying its own tag and no others.
+Two projects keep entries in `alpha.org', so a column selecting by the
+files it scans rather than by its tag would bill beta's hour to alpha.
+The narrow scope reads each project's own file and `agenda-with-archives'
+reads both; in either the tag decides, and the Total is the sum of the
+columns printed beside it."
+  (org-clock-projects-clockmatrix-test-with-data
+      '((:tag "alpha" :name "Alpha")
+        (:tag "beta" :name "Beta"))
+      '(("alpha.org" . "\
+* TODO Alpha task :alpha:
+:LOGBOOK:
+CLOCK: [2026-05-04 Mon 09:00]--[2026-05-04 Mon 11:00] =>  2:00
+:END:
+* TODO Beta task filed with alpha :beta:
+:LOGBOOK:
+CLOCK: [2026-05-05 Tue 09:00]--[2026-05-05 Tue 10:00] =>  1:00
+:END:
+")
+        ("beta.org" . "\
+* TODO Beta task :beta:
+:LOGBOOK:
+CLOCK: [2026-05-06 Wed 09:00]--[2026-05-06 Wed 09:30] =>  0:30
+:END:
+"))
+    ;; Alpha's column opens alpha.org alone, so beta's hour kept there is
+    ;; absent from the report rather than misattributed: the file set bounds
+    ;; the scan and the tag decides the cell.
+    (should (equal (org-clock-projects-clockmatrix-test-table
+                    ":tstart \"2026-05-01\" :tend \"2026-06-01\" :step month")
+                   '(("Month" "alpha" "beta" "Total")
+                     hline
+                     ("2026-05" "2:00" "0:30" "2:30")
+                     hline
+                     ("Total" "2:00" "0:30" "2:30"))))
+    (setq org-agenda-files
+          (mapcar (lambda (f) (expand-file-name f org-directory))
+                  '("alpha.org" "beta.org")))
+    ;; Both columns scan both files here, so only the match keeps them apart.
+    (should (equal (org-clock-projects-clockmatrix-test-table
+                    ":tstart \"2026-05-01\" :tend \"2026-06-01\" :step month
+                     :scope agenda-with-archives")
+                   '(("Month" "alpha" "beta" "Total")
+                     hline
+                     ("2026-05" "2:00" "1:30" "3:30")
+                     hline
+                     ("Total" "2:00" "1:30" "3:30"))))))
+
+(ert-deftest org-clock-projects-clockmatrix-gives-a-doubly-tagged-entry-to-the-first-project ()
+  "An entry carrying two projects' tags counts for the earlier one alone.
+Registry order decides, so the same file read under the opposite order
+reports that hour against the other column.  Under either order the
+columns partition the file's clocked time, which is what keeps the Total
+equal both to the sum of the columns and to the time worked."
+  (let ((files '(("shared.org" . "\
+* TODO Work for both :alpha:beta:
+:LOGBOOK:
+CLOCK: [2026-05-04 Mon 09:00]--[2026-05-04 Mon 10:00] =>  1:00
+:END:
+* TODO Work for beta :beta:
+:LOGBOOK:
+CLOCK: [2026-05-05 Tue 09:00]--[2026-05-05 Tue 09:30] =>  0:30
+:END:
+"))))
+    (org-clock-projects-clockmatrix-test-with-data
+        '((:tag "alpha" :name "Alpha" :file "shared.org")
+          (:tag "beta" :name "Beta" :file "shared.org"))
+        files
+      (should (equal (org-clock-projects-clockmatrix-test-table
+                      ":tstart \"2026-05-01\" :tend \"2026-06-01\" :step month")
+                     '(("Month" "alpha" "beta" "Total")
+                       hline
+                       ("2026-05" "1:00" "0:30" "1:30")
+                       hline
+                       ("Total" "1:00" "0:30" "1:30")))))
+    ;; Beta declared first takes the doubly tagged hour, which leaves alpha
+    ;; with nothing anywhere in the range and so with no column at all.
+    (org-clock-projects-clockmatrix-test-with-data
+        '((:tag "beta" :name "Beta" :file "shared.org")
+          (:tag "alpha" :name "Alpha" :file "shared.org"))
+        files
+      (should (equal (org-clock-projects-clockmatrix-test-table
+                      ":tstart \"2026-05-01\" :tend \"2026-06-01\" :step month")
+                     '(("Month" "beta" "Total")
+                       hline
+                       ("2026-05" "1:30" "1:30")
+                       hline
+                       ("Total" "1:30" "1:30")))))))
+
+(ert-deftest org-clock-projects-clockmatrix-skips-a-registry-entry-without-a-tag ()
+  "An entry declaring no tag is skipped with a warning and heads no column.
+A column is a tag and the files to look for it in.  An entry without a
+tag could only be given a match selecting everything, and the five hours
+of unrelated work in the scan set would be reported as somebody's
+billable time.  The registry drops such an entry before any column is
+built, and says once which entry it dropped and what a project looks
+like."
+  (org-clock-projects-clockmatrix-test-with-data
+      '((:tag "alpha" :name "Alpha")
+        (:name "Nameless" :file "nameless.org"))
+      '(("alpha.org" . "\
+* TODO Alpha task :alpha:
+:LOGBOOK:
+CLOCK: [2026-05-04 Mon 09:00]--[2026-05-04 Mon 11:00] =>  2:00
+:END:
+")
+        ("nameless.org" . "\
+* TODO Work belonging to no project
+:LOGBOOK:
+CLOCK: [2026-05-05 Tue 09:00]--[2026-05-05 Tue 14:00] =>  5:00
+:END:
+"))
+    (setq org-agenda-files
+          (mapcar (lambda (f) (expand-file-name f org-directory))
+                  '("alpha.org" "nameless.org")))
+    (let ((warnings (org-clock-projects-clockmatrix-test-warnings
+                     ":tstart \"2026-05-01\" :tend \"2026-06-01\" :step month
+                      :scope agenda-with-archives")))
+      (should (= 1 (length warnings)))
+      (let ((warning (car warnings)))
+        (should (string-match-p
+                 (regexp-quote "(:name \"Nameless\" :file \"nameless.org\")")
+                 warning))
+        (should (string-match-p ":tag" warning))))
+    (should (equal (org-clock-projects-clockmatrix-test-table
+                    ":tstart \"2026-05-01\" :tend \"2026-06-01\" :step month
+                     :scope agenda-with-archives")
+                   '(("Month" "alpha" "Total")
+                     hline
+                     ("2026-05" "2:00" "2:00")
+                     hline
+                     ("Total" "2:00" "2:00"))))))
+
+(ert-deftest org-clock-projects-clockmatrix-counts-a-repeated-tags-entry-once ()
+  "A tag written twice in `:tags' heads one column and is totalled once.
+Two columns selecting on the same match report the same minutes, and the
+Total row would then count that project's time as often as its tag was
+written."
+  (org-clock-projects-clockmatrix-test-with-data
+      org-clock-projects-clockmatrix-test-projects
+      org-clock-projects-clockmatrix-test-files
+    (should (equal (org-clock-projects-clockmatrix-test-table
+                    ":tstart \"2026-01-01\" :tend \"2027-01-01\" :step month
+                     :tags (\"alpha\" \"alpha\") :stepskip0 t")
+                   '(("Month" "alpha" "Total")
+                     hline
+                     ("2026-05" "3:15" "3:15")
+                     ("2026-06" "3:30" "3:30")
+                     hline
+                     ("Total" "6:45" "6:45"))))))
+
+(ert-deftest org-clock-projects-clockmatrix-selects-an-unregistered-tag-on-that-tag-alone ()
+  "A `:tags' column outside the registry refuses no other project's tag.
+Refusing the tags declared ahead of it is what keeps registered columns
+disjoint, and a tag the registry does not hold stands nowhere in that
+order.  Such a column reports every entry carrying its tag, including
+one a registered project also owns, so its Total is the sum of the
+columns printed rather than the time worked once."
+  (org-clock-projects-clockmatrix-test-with-data
+      '((:tag "alpha" :name "Alpha" :file "shared.org"))
+      '(("shared.org" . "\
+* TODO Work for both :alpha:ghost:
+:LOGBOOK:
+CLOCK: [2026-05-04 Mon 09:00]--[2026-05-04 Mon 10:00] =>  1:00
+:END:
+"))
+    (setq org-agenda-files (list (expand-file-name "shared.org" org-directory)))
+    (should (equal (org-clock-projects-clockmatrix-test-table
+                    ":tstart \"2026-05-01\" :tend \"2026-06-01\" :step month
+                     :tags (\"alpha\" \"ghost\") :scope agenda-with-archives")
+                   '(("Month" "alpha" "ghost" "Total")
+                     hline
+                     ("2026-05" "1:00" "1:00" "2:00")
+                     hline
+                     ("Total" "1:00" "1:00" "2:00"))))))
 
 ;;; Period stepping
 
@@ -394,8 +576,12 @@ CLOCK: [2026-05-04 Mon 09:00]--[2026-05-04 Mon 11:00] =>  2:00
       (should (= 1 (length warnings)))
       (let ((warning (car warnings)))
         (should (string-match-p "ghost" warning))
+        ;; The warning names the file the report would have read, which is a
+        ;; truename: a sandbox reached through a symlink must not make the
+        ;; assertion a comparison of two different spellings of one path.
         (should (string-match-p
-                 (regexp-quote (expand-file-name "ghost.org" org-directory))
+                 (regexp-quote
+                  (file-truename (expand-file-name "ghost.org" org-directory)))
                  warning))
         (should (string-match-p ":file" warning))
         (should (string-match-p "agenda-with-archives" warning))))))

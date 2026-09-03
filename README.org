@@ -9,10 +9,11 @@ and there is no way to leave it running while attending to the second.
 
 * What it adds
 
-A *clock project* is an Org file that owns at most one open clock and its own
-last clock-out time. Several projects hold open clocks at once; exactly one of
-them is Org's active clock at any moment, so every stock Org clock command
-keeps working and operates on that one.
+A *clock project* is a tag that owns at most one open clock and its own last
+clock-out time. An entry belongs to the project whose tag it carries. Several
+projects hold open clocks at once; exactly one of them is Org's active clock at
+any moment, so every stock Org clock command keeps working and operates on that
+one.
 
 Crossing a project boundary is always explicit — either the fork command, or
 answering the prompt a plain =org-clock-in= raises when it targets a different
@@ -32,52 +33,117 @@ a matrix cell and a CSV describe the same stretch of time.
 
 * Dormant until used
 
-A project exists only after it is created — by the fork command, or by
-answering yes at the boundary prompt. Visiting or clocking in a file never
-enrols it. While no project exists, every clocking path defers to stock Org: no
-prompt, no constraint, and an empty modeline segment.
+Registering a project does not start it clocking. A project takes part in
+clocking only once this session has *enrolled* it — by the fork command, or by
+answering yes to the enrolment question a plain =org-clock-in= raises at one of
+its entries. Visiting a file, or clocking into it, never enrols anything. While
+no project is enrolled, every clocking path defers to stock Org: no prompt, no
+constraint, and an empty modeline segment.
 
 The reporting commands are not gated on that. They read the registry, so they
 work in a fresh session that has clocked nothing.
 
 * Projects
 
-A project is three strings that need not agree: a =:tag= its entries carry, a
-=:name= it is called by, and a =:file= its time is kept in. The list comes from
-=org-clock-projects-projects-function=, one entry per project:
+A project is one plist. It declares a =:tag= its entries carry, a =:name= it is
+called by, and a =:file= its time is kept in, and none of the three has to agree
+with the others:
 
 #+begin_src emacs-lisp
-(setq org-clock-projects-projects-function
-      (lambda ()
-        '((:tag "glas" :name "Café Glas" :file "cafe-glas.org")
-          (:tag "acme" :name "Acme Ltd"))))
+(setq org-clock-projects-projects
+      '((:tag "glas" :name "Café Glas" :file "cafe-glas.org")
+        (:tag "acme" :name "Acme Ltd")))
 #+end_src
 
-Each identifier then has exactly one job: the name reaches the prompts, the tag
-selects entries and heads a matrix column, the file base names the exported
-file, and the file itself bounds the scan.
+The tag is the project's identity, everywhere. Clocking, session state, export,
+check and the clockmatrix all key on it: an entry belongs to the project whose
+tag it carries, wherever in a file it sits. The name is what the project is
+called by wherever it is spoken of — the switcher, the clock-out and boundary
+questions, the modeline, and the export and check prompts. The file bounds the
+scans and base-names the exported file.
 
-A bare file name is a valid entry too, so a registry that hands back plain
-paths is understood as it stands. The defaults fill in the rest: a missing
-=:name= falls back to the tag and then to the file's base name, and a missing
-=:file= to =<tag>.org=. Relative file names are expanded against
-=org-directory=.
+=:tag= is required, and the other two follow from it: a missing =:name= is the
+tag, and a missing =:file= is =<tag>.org=. A relative file name is expanded
+against =org-directory=. Keys beyond the three are dropped at the boundary, so
+one registry can carry another package's extensions without either package
+knowing about the other.
 
-The default function reads =org-clock-projects-files=, a plain list of files,
-which is all the clocking half needs.
+An entry declaring no usable =:tag=, and an entry repeating a tag an earlier
+entry already claimed, are skipped with a warning naming the entry and showing
+the form that would have been accepted: one bad line costs its own project,
+never the session. Two projects may legally share a =:name= or a =:file=, and
+=org-clock-projects-check= reports both.
+
+An entry carrying two projects' tags belongs to the first of them in registry
+order, and that one rule holds in every consumer: such an entry lands in the
+first project's CSV, is refused by the second's, and is counted once in the
+matrix, which is what keeps the column totals additive.
+
+The list comes from =org-clock-projects-projects-function=, which defaults to
+reading =org-clock-projects-projects=. Point it at your own project registry's
+accessor to keep one list rather than two; whatever it returns is normalised
+and validated the same way, because the normalisation is the one point every
+registry passes through.
+
+=org-clock-projects-project-records= is the public read of the result: the
+surviving projects in registry order, each a plist of =:tag=, =:name= and
+=:file= with the defaults applied and everything else dropped. That is the
+shape the whole package reads a project through, and the seam to read it
+through from outside.
+
+* Scopes and boundaries
+
+Every open clock belongs to a scope: an enrolled project, or the nil scope that
+holds unscoped work. The nil scope is a peer of the projects rather than the
+absence of one. It holds at most one open clock, keeps its own last clock-out
+time, runs in parallel with every project's clock, and is offered by the
+switcher, by =org-clock-projects-clock-out-all= and by the exit query alongside
+them, under the name =no project=.
+
+A clock's scope is read from its own entry's tags every time it is needed and
+stored nowhere. Enrolling a project therefore adopts the clocks already open at
+its entries, and retagging an entry moves its clock from one scope to another.
+
+A plain =org-clock-in= that would change scope asks up to two questions:
+
+- Whether to stop the clock running now. Answering no leaves it running and
+  opens the new one alongside it.
+- Whether to cross the boundary. At an entry a registered project owns, that is
+  an offer to enrol the project; at an entry no project owns, it is an offer to
+  leave the current project for unscoped work. Declining either form cancels
+  the clock-in: no clock opens, and the session is left as it was found.
+
+The second question is asked only while the session is scoped to a project.
+From the nil scope nothing is asked beyond the first, because an enrolled
+project's entry opens under that project and every other entry opens unscoped,
+which is what stock Org would do anyway.
+
+A clock landing unscoped at an entry no project owns, in a file that is some
+project's own, says =Clocked in unscoped in <file>= — a message, not a
+question. That is the forgotten tag caught where it costs one keystroke to fix
+rather than one invoice to correct. An owned entry clocked unscoped on purpose
+is silent, since its time is still selected by tag at reporting and nothing is
+lost.
+
+=org-clock-projects-fork= settles the scope itself, so the first question does
+not arise. At an unowned entry while a project is current it asks the crossing
+question; at an owned entry whose project is already holding open clocks it asks
+before closing them, naming each. Declining either aborts, and the session is
+put back as it was found — the enrolment the fork had already made included, so
+a declined fork does not leave the project live for the rest of the session.
 
 * Commands
 
-| Command                               | What it does                                                   |
-|---------------------------------------+----------------------------------------------------------------|
-| =org-clock-projects-fork=             | Clock in at point, leaving the current project's clock running |
-| =org-clock-projects-switch=           | Make one of the open clocks active and jump to it              |
-| =org-clock-projects-clock-out-all=    | Clock out of every open clock                                  |
-| =org-clock-projects-clear=            | Forget a project's session state; =C-u= for every project      |
-| =org-clock-projects-kill-emacs-query= | Ask about each open clock on exit; installed by the mode       |
-| =org-clock-projects-export=           | Write a project's clock entries for a period to CSV            |
-| =org-clock-projects-check=            | Report what is questionable about a project's clock data       |
-| =org-clock-projects-clockmatrix=      | Insert a =clockmatrix= dynamic block at point and render it    |
+| Command                               | What it does                                                  |
+|---------------------------------------+---------------------------------------------------------------|
+| =org-clock-projects-fork=             | Clock in at point, leaving every other scope's clocks running |
+| =org-clock-projects-switch=           | Make one of the open clocks active and jump to it             |
+| =org-clock-projects-clock-out-all=    | Clock out of every open clock                                 |
+| =org-clock-projects-clear=            | Forget a project's session state; =C-u= for every project     |
+| =org-clock-projects-kill-emacs-query= | Ask about each open clock on exit; installed by the mode      |
+| =org-clock-projects-export=           | Write a project's clock entries for a period to CSV           |
+| =org-clock-projects-check=            | Report what is questionable about a project's clock data      |
+| =org-clock-projects-clockmatrix=      | Insert a =clockmatrix= dynamic block at point and render it   |
 
 Prompts that offer to close a clock name it, and say when it started and how
 long it has run, so a clock opened five minutes ago and one left open since
@@ -171,7 +237,9 @@ month should read as zero rows rather than as a broken build.
 
 Entries are picked out by the project's tag, matched *with inheritance*, so a
 =#+FILETAGS:= line at the top of a project file reaches every clock beneath it.
-A project with no tag takes every entry the period holds in its files.
+The match is exclusive: it asks for the project's own tag and refuses every tag
+declared ahead of it in the registry, so an entry carrying two projects' tags
+lands in the earlier project's CSV and in that one only.
 
 The prefix argument both widens the scan and waives the checks:
 
@@ -217,11 +285,11 @@ Nothing has been written by the time either is raised.
 
 =org-clock-projects-check= asks the same two questions, takes the same prefix
 argument for widening, and writes nothing. It renders every finding into
-=*org-clock-projects-check*=, one line each, each line a button that takes you
-to the clock line it is about. A run that turns nothing up says so rather than
-showing an empty buffer.
+=*org-clock-projects-check*=, one line each, and every finding about a clock
+line is a button that takes you to that line. A run that turns nothing up says
+so rather than showing an empty buffer.
 
-It reports four things:
+Six things are reported about the project asked for:
 
 | Kind          | What it means                                                        |
 |---------------+----------------------------------------------------------------------|
@@ -229,17 +297,51 @@ It reports four things:
 | =overlap=     | Two selected entries covering the same minutes                       |
 | =long-entry=  | An entry longer than =org-clock-projects-duration-threshold= hours   |
 | =missing-tag= | One of the project's own files that never mentions the project's tag |
+| =multi-tag=   | An entry in one of those files answering to two projects at once     |
+| =unowned=     | A clock in one of those files at an entry no project owns            |
 
 The duration threshold is the mis-entry guard, and defaults to 10 hours. A
 boundary check catches a forgotten clock-out only when it happens to straddle a
 period edge; a stretch no working day reaches is visible wherever in the period
 it falls.
 
-=missing-tag= is always asked of the project's own file and its existing
-archives, whatever the scan scope. Widening is how work filed elsewhere is
-found, so the agenda files it reaches are not expected to carry the tag, and
-asking the question of them would bury the one file that should under every
-file that never claimed to.
+=missing-tag=, =multi-tag= and =unowned= are always asked of the project's own
+file and its existing archives, whatever the scan scope. Widening is how work
+filed elsewhere is found, so the agenda files it reaches are neither expected to
+carry the tag nor expected to be owned by the project, and asking those
+questions of them would bury the project's own drift under a report about the
+agenda.
+
+=unowned= is billable time drifting out of the invoice, so it is period-scoped
+like the clocked-time findings. =multi-tag= is not: ambiguous ownership is a
+property of the registry and the file rather than of a month, and an entry first
+billed in September is worth knowing about in August. A file that carries no tag
+of its own is left out of both, because every clock in it is unowned and the
+file is already reported once, by =missing-tag=, for the one fault behind all of
+them.
+
+Below those, a section of its own reports what is wrong with the registry
+itself. These findings hold whichever project and whichever period were asked
+for, so they are counted separately rather than swelling the project's tally,
+and they are plain lines rather than buttons because there is no clock line to
+be taken to.
+
+| Kind             | What it means                                                            |
+|------------------+--------------------------------------------------------------------------|
+| =illegal-tag=    | A =:tag= not spelled the way Org spells a tag, so it selects nothing     |
+| =inheritance=    | A tag Org does not pass down, so only the file's own clocks are selected |
+| =shared-file=    | Two projects keeping their time in the same file                         |
+| =duplicate-name= | Two projects answering to one name, of which the prompts reach the first |
+
+Org's tag characters are alphanumerics plus =_=, =@=, =#= and =%=. A =:tag= with
+anything else in it — a hyphen, most often — is read by Org as a tag expression
+rather than a tag, and selects nothing at all, which is a fault no clock line
+can show you. =inheritance= is raised separately for each of the three settings
+that can cause it: =org-use-tag-inheritance= not passing the tag down,
+=org-tags-exclude-from-inheritance= holding it, and
+=org-agenda-use-tag-inheritance= leaving it off entries in some agenda views,
+which makes what the agenda shows and what is billed disagree while the other
+two look healthy.
 
 This is the command to reach for once an export has stopped, and the one to run
 before invoicing so that everything questionable arrives at once rather than
@@ -352,12 +454,17 @@ mirrors clocktable, which likewise requires a range whenever =:step= is used.
 ** Behaviour
 
 - A column is headed by its project's tag, so a header can be pasted straight
-  into a clocktable =:match= when reconciling. A registered project with no
-  tag is headed by its file's base name instead, and takes that file whole.
+  into a clocktable =:match= when reconciling.
+- A column selects on the exclusive match its project's tag stands for, so an
+  entry carrying two projects' tags lands in the earlier project's column
+  alone and the Total stays the sum of the columns printed beside it. A column
+  naming a tag the registry does not hold has no place in that order and so
+  nothing to exclude: it selects on its tag alone.
 - =:tags= names the columns outright. Each tag is resolved against the
-  registry first, so a project registered under a file name of its own is
-  still read from that file; a tag registered nowhere falls back to
-  =<tag>.org=.
+  registry first, so a project keeping its time in a file of its own is still
+  read from that file; a tag registered nowhere falls back to =<tag>.org=. A
+  tag named twice is one column, since two columns selecting the same match
+  would have the Total count those minutes twice.
 - A project with zero clocked time across the whole range is dropped as a
   column. A cell with zero time is left blank rather than showing =0:00=.
   Every period in the range gets a row, including one with no clocked time
@@ -417,15 +524,18 @@ With =straight.el= or Doom:
 (use-package org-clock-projects
   :after org
   :config
-  (setq org-clock-projects-files '("client-a.org" "client-b.org"))
+  (setq org-clock-projects-projects
+        '((:tag "clienta" :name "Client A" :file "client-a.org")
+          (:tag "clientb" :name "Client B" :file "client-b.org")))
   (org-clock-projects-mode 1))
 #+end_src
 
-Names in =org-clock-projects-files= are expanded against =org-directory=. To
-drive the list from a project registry you already keep, set
+A relative =:file= is expanded against =org-directory=, and against nothing
+else: the file a project's time is kept in does not move with the buffer that
+happens to be current when the registry is read. To drive the list from a
+project registry you already keep, set
 =org-clock-projects-projects-function= to a function returning it — the package
-has no dependency on any particular registry, and reads either [[*Projects][records]] or bare
-file names:
+has no dependency on any particular registry, only on the [[*Projects][plist shape]]:
 
 #+begin_src emacs-lisp
 (setq org-clock-projects-projects-function #'my-project-records)
@@ -435,7 +545,7 @@ file names:
 
 | Setting                                   | Default                                        | Meaning                                                            |
 |-------------------------------------------+------------------------------------------------+--------------------------------------------------------------------|
-| =org-clock-projects-files=                | =nil=                                          | Org files that may become clock projects                           |
+| =org-clock-projects-projects=             | =nil=                                          | The projects, as a list of plists                                  |
 | =org-clock-projects-projects-function=    | reads the above                                | Where the projects come from                                       |
 | =org-clock-projects-continue-threshold=   | =30=                                           | Minutes below which a project's clock-out time is resumed silently |
 | =org-clock-projects-export-directory=     | ="~/"=                                         | Where exported CSV files are written                               |
@@ -454,18 +564,38 @@ made while no clock is running. Idle-based resolution is unaffected.
 
 * Repairing damage
 
-A project holding more than one open clock is not a state this package creates.
+A scope holding more than one open clock is not a state this package creates.
 It comes from a crash, or from an exit query that was declined. Every path that
-opens or closes a clock can see the whole set, so the surplus can always be
-reached: =org-clock-projects-clock-out-all= and the exit query cover every one of
-them, clocking in on a project closes whatever it was already holding, and the
-fork command says how many it is about to close.
+opens or closes a clock sees every clock the scan reaches, so a surplus inside
+the registry's file set can always be got at: =org-clock-projects-clock-out-all=
+and the exit query cover every one of them, clocking in on a project closes
+whatever it was already holding, and the fork command says how many it is about
+to close.
 
-Reporting one clock per file instead would leave the rest invisible to exactly
+Reporting one clock per scope instead would leave the rest invisible to exactly
 the commands that exist to close them, and therefore permanent — surviving every
-restart and never offered again. For the same reason the scan widens: Org's own
-search starts at =point-min= and respects narrowing, and a narrowed project
-buffer would otherwise hide its clocks from all of it at once.
+restart and never offered again. For the same reason the scan widens each
+buffer it reads: Org's own search starts at =point-min= and respects
+narrowing, and a narrowed project buffer would otherwise hide its clocks from
+all of those commands at once.
+
+What the scan can reach is the registry's file set, which is a bound on the cost
+of running it and never a statement about who owns what. Two limitations follow,
+and both are the price of keeping every clock-in, modeline refresh and report
+line off an agenda-wide scan:
+
+- A clock at an entry a project owns, but sitting in a file outside that
+  project's =:file=, is not seen by the one-clock-per-scope invariant, by
+  =org-clock-projects-clock-out-all= or by the exit query — the scan never
+  reaches the file, and ownership is not what bounds it.
+  =org-clock-projects-check= is what finds work filed away from its project's
+  own file: run it with =C-u= to reach every agenda file, where a clock still
+  running is reported as =open-clock= wherever it sits.
+- Within a session the nil scope's open clock is remembered as it is opened, so
+  it stays visible even though no file set bounds it. That memory does not
+  survive a restart. An unscoped clock left open in a file outside every
+  project's file set is therefore untracked until its file is visited again;
+  project clocks are unaffected, because their files are rescanned.
 
 Whether you are asked at all stays yours, through Org's own
 =org-clock-ask-before-exiting=; this only changes which question is asked.
@@ -478,12 +608,24 @@ resynchronise.
 
 The set of open clocks is read back from the files whenever it is needed and
 never cached, so clocks left open across a restart, or started by another tool,
-are still visible.
+are still visible. =org-clock-projects-open-clocks= is the public read of them:
+an alist of =((SCOPE . FILE) . CLOCK)=, where =SCOPE= is the tag of the enrolled
+project the clock belongs to or nil for unscoped work, =FILE= is the file the
+clock line lives in, and =CLOCK= is the cons of a marker and a start time that
+Org's own clock functions take.
 
-A clock's scope is derived from its file rather than recorded at clock-in time,
-so nothing has to be remembered per clock and scope survives a restart. The
-current project is a session pointer that outlives its clocks; stored clock-out
-times are session-lifetime, matching Org's own handling of the global one.
+A clock's scope is derived from its own entry's tags rather than recorded at
+clock-in time, so nothing has to be remembered per clock and scope survives a
+restart. That is also what lets enrolling a project adopt the clocks already
+open at its entries, and what moves a clock between scopes when its entry is
+retagged. The nil scope is the one exception, since no file set bounds it: its
+open clock is remembered as it is opened, and re-verified against the buffer
+before it is handed to anyone, so a marker whose line has moved on is dropped
+rather than reported. It is remembered whether or not a project is enrolled,
+which is what makes a clock opened while the session was still dormant visible
+the moment the first project is enrolled. The current project is a session
+pointer that outlives its clocks; stored clock-out times are session-lifetime,
+matching Org's own handling of the global one.
 
 Clocking out does not promote another clock to active. Promotion re-creates the
 problem it appears to solve: with a promoted clock active, the next plain
@@ -528,9 +670,10 @@ accepts any inactive timestamp and the element parser calls the line a clock,
 but Org resumes only =[YYYY-MM-DD DDD HH:MM]= — no missing time, no single-digit
 hour, no repeater or warning cookie, and not a range already closed. Each of
 those is found and then answered with a *new* clock line beside it rather than
-a resumed one. The abbreviating dot some day names carry is the shape that
-looks broken and is not: Org resumes it, so this does too. Such a line is reported and left alone instead, since the
-alternative is one open clock silently becoming two.
+a resumed one, so a line Org will not resume is reported and left where it is:
+the alternative is one open clock silently becoming two. The abbreviating dot
+some day names carry is the shape that looks broken and is not — Org resumes
+it, so this does too.
 
 The switcher goes further and refuses outright, taking you to the offending
 line. A switch that cannot happen must not look like one that did: the
@@ -562,8 +705,12 @@ say so.
 * Tests
 
 #+begin_src sh
-eask install-deps && eask test ert test/*.el
+eask install-deps && eask run script test
 #+end_src
+
+The =test= script sweeps this package's =.elc= files before running =ert=. Stale
+bytecode is loaded in preference to newer source, so without the sweep a run can
+silently exercise the last compile rather than the working tree.
 
 Tests assert only externally observable state: the text of the clock lines in
 the fixture files, which clock Org considers active, the current project, the
@@ -575,10 +722,12 @@ pinning down the answer. The set of clock timestamps Org resumes in place is
 one such: each shape is handed to Org with the package out of the way, and the
 switcher is required to agree with whatever Org did. That catches the guard
 drifting in either direction, and stays correct if Org ever changes the
-pattern. Several flows ask two or
-three questions in sequence, so the harness takes a queue of scripted answers
-and fails on a question the queue did not anticipate — how many questions a
-flow asks, and in what order, is a tested property rather than an accident.
+pattern.
+
+Several flows ask two or three questions in sequence, so the harness takes a
+queue of scripted answers and fails on a question the queue did not anticipate
+— how many questions a flow asks, and in what order, is a tested property
+rather than an accident.
 
 Every file under =test/= that names tests is loaded by path, which is what makes
 the harness files separate: loading a file twice redefines the tests in it, and

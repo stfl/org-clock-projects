@@ -1,7 +1,7 @@
 ;; -*- mode: eask; lexical-binding: t; -*-
 
 (package "org-clock-projects"
-         "0.2.0"
+         "0.3.0"
          "Per-project parallel Org clocks")
 
 (website-url "https://github.com/stfl/org-clock-projects")
