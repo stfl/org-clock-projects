@@ -4,7 +4,7 @@
 
 ;; Author: Stefan Lendl <s@stfl.dev>
 ;; Version: 0.3.0
-;; Package-Requires: ((emacs "28.1") (org "9.6") (org-clock-csv "1.2"))
+;; Package-Requires: ((emacs "29.1") (org "9.6") (org-clock-csv "1.2"))
 ;; Keywords: calendar, convenience
 ;; URL: https://github.com/stfl/org-clock-projects
 

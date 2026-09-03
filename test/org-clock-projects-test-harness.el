@@ -10,6 +10,14 @@
 
 ;;; Code:
 
+;; `display-warning' is an autoload until something pulls in warnings.el, and
+;; the warning capture below replaces its function cell.  Called while it is
+;; still an autoload it loads warnings.el, which defines the real
+;; `display-warning' over the replacement and takes the call, so the first
+;; warning of the session escapes capture and only the first test to assert a
+;; warning fails.  Which Emacs builds preload warnings.el varies, which makes
+;; that a failure seen on one Emacs and not another.
+(require 'warnings)
 (require 'ert)
 (require 'cl-lib)
 (require 'org)
