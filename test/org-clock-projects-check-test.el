@@ -643,6 +643,37 @@ knowing about in August, when the tag is still cheap to fix."
       (should (equal (org-clock-projects-check-test-kinds) '("multi-tag"))))))
 
 
+(ert-deftest org-clock-projects-check-test-ambiguity-survives-an-untagged-file ()
+  "An untagged file silences its unowned clocks, not its ambiguous entries.
+Every clock in a file that declares no tag is unowned for one reason, and
+the file is reported once for it, so those are left out rather than
+answering a single missing `#+FILETAGS:\' line with a finding per clock
+line.  A doubly-tagged headline is a different fault with a different
+repair, it is named once for the entry rather than once for the clock,
+and the other project\='s scan cannot see it — its files are not this
+one.  Dropped here it would be reported nowhere at all."
+  (org-clock-projects-check-test-with-projects
+      (list org-clock-projects-check-test-cafe
+            org-clock-projects-check-test-birds)
+      `(("corner-cafe.org"
+         . ,(concat "* TODO Both :cafe:birds:\n:LOGBOOK:\n"
+                    (org-clock-projects-test-clock-line
+                     (org-clock-projects-test-time-at 2024 8 7 9)
+                     (org-clock-projects-test-time-at 2024 8 7 11))
+                    ":END:\n"
+                    "* TODO Nobody\n:LOGBOOK:\n"
+                    (org-clock-projects-test-clock-line
+                     (org-clock-projects-test-time-at 2024 8 8 9)
+                     (org-clock-projects-test-time-at 2024 8 8 10))
+                    ":END:\n")))
+    (org-clock-projects-test-with-prompts '("Corner Café" "2024-08")
+      (org-clock-projects-check)
+      (should (equal (org-clock-projects-check-test-kinds)
+                     '("missing-tag" "multi-tag")))
+      (should (string-match-p
+               "Bird Atlas"
+               (org-clock-projects-check-test-says "multi-tag"))))))
+
 ;;;; The registry itself
 
 (ert-deftest org-clock-projects-check-test-a-tag-that-does-not-inherit-is-reported ()

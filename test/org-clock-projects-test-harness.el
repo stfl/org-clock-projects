@@ -334,18 +334,20 @@ created, and a project's own file is tagged as
            org-clock-projects--warned-entries nil)
      ,@body))
 
-;;;; The configuration this package absorbed
+;;;; A parity oracle for the continuation prompt
 ;;
-;; The continuation advice moved out of the editor configuration into this
-;; package.  It is reproduced here verbatim so the move can be shown to have
-;; preserved the behaviour, rather than merely asserted to have.
+;; The hand-written continuation advice this package's prompt stands in for,
+;; kept here verbatim as an oracle.  The tests below run both over the same
+;; inputs and compare, so the prompt's behaviour is demonstrated against a
+;; second implementation rather than restated by an assertion that agrees with
+;; whatever the package happens to do.
 
 (defun org-clock-projects-test--legacy-minutes-ago (time)
-  "The time helper the absorbed advice used."
+  "The time helper the oracle advice reads elapsed minutes with."
   (/ (org-time-convert-to-integer (time-subtract (org-current-time) time)) 60))
 
 (defun org-clock-projects-test--legacy-advice (orig-fn &rest args)
-  "The continuation advice this package absorbed."
+  "The oracle: continuation decided from the session-wide clock-out time."
   (let* ((start-time (cadr args))
          (org-clock-continuously
           (if start-time

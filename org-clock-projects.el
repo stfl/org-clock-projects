@@ -1030,47 +1030,57 @@ the target scope's own open clocks are closed, since a scope never holds
 two, and declining that offer aborts."
   (interactive)
   (let* ((epom (point-marker))
-         (owner (org-clock-projects--owner epom)))
-    (if owner
-        ;; Enrolment has to precede the collision check: a scope is derived
-        ;; from enrolment, so an unenrolled project's clocks answer to the nil
-        ;; scope and asking first would find none of them.
-        (let ((enrolled org-clock-projects--enrolled)
-              (tag (org-clock-projects--record-tag owner)))
-          (org-clock-projects--create tag)
-          (let ((existing (org-clock-projects--scope-clocks tag)))
-            (when (and existing
-                       (not (y-or-n-p
-                             (format
-                              "%s already has %s; clock out and start here? "
-                              (org-clock-projects-name tag)
-                              (mapconcat
-                               #'org-clock-projects--clock-description
-                               existing ", ")))))
-              ;; A declined fork leaves the session exactly as it found it.
-              ;; The enrolment above would otherwise make the project live for
-              ;; the rest of the session and silence its boundary question.
-              (setq org-clock-projects--enrolled enrolled)
+         (owner (org-clock-projects--owner epom))
+         ;; Captured before anything is decided.  An enrolment that outlives a
+         ;; clock-in which never happened leaves the project live for the rest
+         ;; of the session: its boundary question is silenced, and every clock
+         ;; standing open at one of its entries is adopted into a namespace
+         ;; nobody opened.  Nothing here is kept unless the clock-in succeeds.
+         (enrolled org-clock-projects--enrolled)
+         (committed nil))
+    (unwind-protect
+        (progn
+          (if owner
+              ;; Enrolment has to precede the collision check: a scope is
+              ;; derived from enrolment, so an unenrolled project's clocks
+              ;; answer to the nil scope and asking first would find none of
+              ;; them.
+              (let ((tag (org-clock-projects--record-tag owner)))
+                (org-clock-projects--create tag)
+                (let ((existing (org-clock-projects--scope-clocks tag)))
+                  (when (and existing
+                             (not (y-or-n-p
+                                   (format
+                                    "%s already has %s; clock out and start here? "
+                                    (org-clock-projects-name tag)
+                                    (mapconcat
+                                     #'org-clock-projects--clock-description
+                                     existing ", ")))))
+                    (user-error "Aborted"))
+                  ;; Every one of them: leaving any behind keeps the project
+                  ;; over its one clock, and if the one left running is the
+                  ;; heading at point, Org reads the clock-in as a
+                  ;; continuation of it and writes nothing at all.
+                  (dolist (clock existing)
+                    (org-clock-projects--clock-out clock))))
+            ;; An unowned entry crosses into the nil scope.  That is a boundary
+            ;; only while a project is current; already unscoped, nothing is
+            ;; crossed.
+            (when (and org-clock-projects--current
+                       (not (y-or-n-p (format "Leave %s for unscoped work? "
+                                              (org-clock-projects-name
+                                               org-clock-projects--current)))))
               (user-error "Aborted"))
-            ;; Every one of them: leaving any behind keeps the project over
-            ;; its one clock, and if the one left running is the heading at
-            ;; point, Org reads the clock-in as a continuation of it and
-            ;; writes nothing at all.
-            (dolist (clock existing) (org-clock-projects--clock-out clock))))
-      ;; An unowned entry crosses into the nil scope.  That is a boundary only
-      ;; while a project is current; already unscoped, nothing is crossed.
-      (when (and org-clock-projects--current
-                 (not (y-or-n-p (format "Leave %s for unscoped work? "
-                                        (org-clock-projects-name
-                                         org-clock-projects--current)))))
-        (user-error "Aborted"))
-      ;; The nil scope holds one clock like any other, and only its own is
-      ;; closed here — every project's clock keeps running, which is the whole
-      ;; point of forking.
-      (dolist (clock (org-clock-projects--scope-clocks nil))
-        (org-clock-projects--clock-out clock)))
-    (let ((org-clock-projects--parallel t))
-      (org-clock-in))))
+            ;; The nil scope holds one clock like any other, and only its own
+            ;; is closed here — every project's clock keeps running, which is
+            ;; the whole point of forking.
+            (dolist (clock (org-clock-projects--scope-clocks nil))
+              (org-clock-projects--clock-out clock)))
+          (let ((org-clock-projects--parallel t))
+            (org-clock-in))
+          (setq committed t))
+      (unless committed
+        (setq org-clock-projects--enrolled enrolled)))))
 
 ;;;###autoload
 (defun org-clock-projects-switch ()
@@ -1873,16 +1883,17 @@ an agenda file widened in to find work tagged for this project is not
 expected to be owned by it, and asking the question of every agenda file
 would bury the project's own drift under a report about the agenda.
 
-A file of RECORD's that carries no tag of its own is left out entirely.
-Every clock in it is unowned, and the file is already reported once for
-the one fault behind all of them, so scanning it would answer a single
-missing `#+FILETAGS:' line with a finding per clock line."
+Only the unowned half is silenced in a file of RECORD's that carries no
+tag of its own.  Every clock in such a file is unowned for one reason,
+and the file is already reported once for it, so answering a single
+missing `#+FILETAGS:' line with a finding per clock line would bury the
+report.  Ambiguity is a different fault with a different repair, it is
+reported once per entry rather than once per clock, and it is invisible
+from the other project's scan, so it is reported wherever it is found."
   (let* ((tag (org-clock-projects--record-tag record))
          (from (org-clock-projects--time-stamp (plist-get period :start)))
          (until (org-clock-projects--time-stamp (plist-get period :end)))
-         (files (seq-filter (lambda (file)
-                              (org-clock-projects--file-tagged-p file tag))
-                            (org-clock-projects--export-files record nil)))
+         (files (org-clock-projects--export-files record nil))
          ;; An entry holds any number of clocks and its ownership is the
          ;; same for all of them, so the ambiguity is reported once for the
          ;; entry rather than once per clock line beneath it.
@@ -1916,6 +1927,7 @@ missing `#+FILETAGS:' line with a finding per clock line."
                             (mapconcat #'org-clock-projects--record-name
                                        owners " and "))))))
               ((and (null owners)
+                    (org-clock-projects--file-tagged-p file tag)
                     (if (org-clock-projects--clock-closed-p element)
                         (org-clock-projects--in-period-p
                          start (org-clock-projects--clock-end element)
@@ -2505,14 +2517,19 @@ would then count those minutes as often as the tag was written."
   "Return the minutes MATCH selects in FILES between START and END.
 Delegating the sum to Org is what makes a cell agree with the equivalent
 clocktable, and clips clocks that cross START or END rather than
-double-counting or dropping them."
+double-counting or dropping them.
+
+The buffer comes from `org-clock-projects--org-buffer', because a file
+set may name an archive and Org names one `<file>.org_archive', which no
+`auto-mode-alist' entry claims: read in Fundamental mode it answers no
+tags at all, so the match would select nothing and the cell would read
+zero for a project whose archive is full of its time."
   (let ((params (list :maxlevel 0
                       :match match
                       :tstart (format-time-string (org-time-stamp-format t t) start)
                       :tend (format-time-string (org-time-stamp-format t t) end))))
     (cl-loop for file in files
-             sum (with-current-buffer (or (find-buffer-visiting file)
-                                          (find-file-noselect file))
+             sum (with-current-buffer (org-clock-projects--org-buffer file)
                    (save-excursion
                      (save-restriction
                        (widen)
@@ -2521,7 +2538,8 @@ double-counting or dropping them."
 (defun org-clock-projects--clockmatrix-rows (columns periods step)
   "Return one row per period in PERIODS.
 Each row is a cons of the period's label and the minutes each of COLUMNS
-reports in it."
+reports in it.  STEP is the size of a period, which is what settles how
+its label reads."
   (org-agenda-prepare-buffers
    (cl-remove-duplicates
     (apply #'append (mapcar (lambda (column) (plist-get column :files)) columns))

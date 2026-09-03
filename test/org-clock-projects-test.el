@@ -321,6 +321,37 @@ clock and leaves every project's clock running."
     (should (equal (org-clock-projects-test-current) "Alpha Project"))
     (should (equal (org-clock-projects-test-active-heading) "A one"))))
 
+(ert-deftest org-clock-projects-test-a-failed-fork-enrols-nothing ()
+  "A fork that cannot clock in leaves the project unenrolled.
+Enrolment precedes the collision check, so it has already happened by the
+time the clock-in runs.  If it outlived a clock-in that failed, the
+project would be live for the rest of the session: the enrolment question
+below would never be asked again, and any clock standing open at one of
+its entries would be adopted into a namespace nobody opened."
+  (org-clock-projects-test-with-data
+      org-clock-projects-test-projects
+      `(("alpha.org" . ,(org-clock-projects-test-entry "A one"))
+        ("gamma.org" . ,(org-clock-projects-test-entry "G one")))
+    (org-clock-projects-test-with-answers '()
+      (org-clock-projects-test-fork "alpha.org" "A one"))
+    (org-clock-projects-test-advance 30)
+    ;; Org refuses to write a CLOCK line into a read-only buffer, which is a
+    ;; clock-in that fails after the enrolment rather than before it.
+    (with-current-buffer (org-clock-projects-test-buffer "gamma.org")
+      (setq buffer-read-only t))
+    (unwind-protect
+        (org-clock-projects-test-with-answers '()
+          (should-error (org-clock-projects-test-fork "gamma.org" "G one")))
+      (with-current-buffer (org-clock-projects-test-buffer "gamma.org")
+        (setq buffer-read-only nil)))
+    (should (equal (org-clock-projects-test-lines "gamma.org") '()))
+    ;; The proof that gamma is unenrolled: crossing into it from alpha still
+    ;; asks to enrol it.  An answer the queue holds and the flow never uses is
+    ;; itself a failure, so a question that stopped being asked fails here.
+    (org-clock-projects-test-with-answers '(nil t)
+      (org-clock-projects-test-clock-in "gamma.org" "G one"))
+    (should (equal (org-clock-projects-test-current) "Gamma Project"))))
+
 (ert-deftest org-clock-projects-test-fork-while-unscoped-crosses-no-boundary ()
   "Already unscoped, nothing is crossed: no question, and only the nil
 scope's own clock is closed."
